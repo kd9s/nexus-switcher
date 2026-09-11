@@ -132,6 +132,9 @@ function applyTranslations() {
         el.title = t(el.getAttribute('data-i18n-title'));
     });
 
+    document.querySelectorAll('[data-i18n-aria-label]').forEach(el => {
+        el.setAttribute('aria-label', t(el.getAttribute('data-i18n-aria-label')));
+    });
 }
 
 loadTranslations();
@@ -1399,7 +1402,7 @@ function createAccountCard(steamId, user, { hasActiveSession, isCurrent, pickMod
     card.innerHTML = `
         <div class="card-header">
             <div class="profile-pic placeholder-pic" style="padding: 0;">${avatarHtml}</div>
-            <button class="btn-icon notes-btn ${hasNotes ? 'has-notes' : ''}" data-steamid="${steamId}" data-persona="${personaName}" title="${t('account.notes')}" style="position: absolute; top: 0; left: 0; width: 28px; height: 28px; opacity: ${hasNotes ? '1' : '0'}; transition: opacity 0.2s;">
+            <button class="btn-icon notes-btn ${hasNotes ? 'has-notes' : ''}" data-steamid="${steamId}" data-persona="${personaName}" title="${t('account.notes')}" aria-label="${t('account.notes')}" style="position: absolute; top: 0; left: 0; width: 28px; height: 28px; opacity: ${hasNotes ? '1' : '0'}; transition: opacity 0.2s;">
                 <i class="fa-solid ${hasNotes ? 'fa-note-sticky' : 'fa-pen-to-square'}" style="font-size: 0.75rem;"></i>
             </button>
         </div>
@@ -1414,7 +1417,7 @@ function createAccountCard(steamId, user, { hasActiveSession, isCurrent, pickMod
         </div>
         <div class="card-actions">
             ${actionHtml}
-            <button class="btn-icon dropdown-toggle" data-steamid="${steamId}">
+            <button class="btn-icon dropdown-toggle" data-steamid="${steamId}" aria-label="${t('account.other_accounts')}">
                 <i class="fa-solid fa-ellipsis-vertical"></i>
             </button>
         </div>`;
@@ -1858,7 +1861,7 @@ async function loadInstalledGames() {
         let bannerHtml = `
             <div class="profile-pic placeholder-pic" style="position: relative; width: 100%; height: 120px; border-radius: 12px; margin-bottom: 1rem; background: rgba(0,0,0,0.3); border: none;">
                 ${game.icon}
-                <button class="btn-icon change-cover-btn" data-game="${game.id || game.name}" style="position: absolute; top: 8px; right: 8px; width: 32px; height: 32px; background: rgba(0,0,0,0.6); border: none; z-index: 10; opacity: 0; transition: opacity 0.2s;" title="تغيير الغلاف">
+                <button class="btn-icon change-cover-btn" data-game="${game.id || game.name}" style="position: absolute; top: 8px; right: 8px; width: 32px; height: 32px; background: rgba(0,0,0,0.6); border: none; z-index: 10; opacity: 0; transition: opacity 0.2s;" title="تغيير الغلاف" aria-label="تغيير الغلاف">
                     <i class="fa-solid fa-image" style="font-size: 1rem;"></i>
                 </button>
             </div>
@@ -1880,7 +1883,7 @@ async function loadInstalledGames() {
                     <div class="profile-pic placeholder-pic fallback-banner" style="display: none; width: 100%; height: 100%; border-radius: 12px; background: rgba(0,0,0,0.3); border: none; position: absolute; top: 0; left: 0; justify-content: center; align-items: center;">
                         ${game.icon}
                     </div>
-                    <button class="btn-icon change-cover-btn" data-game="${game.id || game.name}" style="position: absolute; top: 8px; right: 8px; width: 32px; height: 32px; background: rgba(0,0,0,0.6); border: none; z-index: 10; opacity: 0; transition: opacity 0.2s;" title="تغيير الغلاف">
+                    <button class="btn-icon change-cover-btn" data-game="${game.id || game.name}" style="position: absolute; top: 8px; right: 8px; width: 32px; height: 32px; background: rgba(0,0,0,0.6); border: none; z-index: 10; opacity: 0; transition: opacity 0.2s;" title="تغيير الغلاف" aria-label="تغيير الغلاف">
                         <i class="fa-solid fa-image" style="font-size: 1rem;"></i>
                     </button>
                 </div>
@@ -1897,7 +1900,7 @@ async function loadInstalledGames() {
             } else {
                 accountBadgeHtml = `<span class="game-account-badge" style="font-size: 0.75rem; background: rgba(239,68,68,0.1); color: var(--danger); padding: 0.2rem 0.5rem; border-radius: 6px; display: inline-flex; align-items: center; gap: 0.3rem;"><i class="fa-solid fa-circle-question"></i> ${t('game.unknown_owner')}</span>`;
             }
-            assignBtnHtml = `<button class="btn-icon assign-account-btn" data-game-id="${game.id}" data-game-name="${game.name}" title="${t('game.assign_account')}" style="position: absolute; top: 8px; left: 8px; width: 30px; height: 30px; background: rgba(0,0,0,0.7); border: none; z-index: 10; opacity: 0; transition: opacity 0.2s; font-size: 0.85rem;"><i class="fa-solid fa-user-pen"></i></button>`;
+            assignBtnHtml = `<button class="btn-icon assign-account-btn" data-game-id="${game.id}" data-game-name="${game.name}" title="${t('game.assign_account')}" aria-label="${t('game.assign_account')}" style="position: absolute; top: 8px; left: 8px; width: 30px; height: 30px; background: rgba(0,0,0,0.7); border: none; z-index: 10; opacity: 0; transition: opacity 0.2s; font-size: 0.85rem;"><i class="fa-solid fa-user-pen"></i></button>`;
         }
         
         // Playtime badge
@@ -1922,7 +1925,7 @@ async function loadInstalledGames() {
                 <button class="btn btn-switch launch-game-btn" data-platform="${game.platform}" data-id="${game.id}" data-exe="${game.exe || ''}" data-owner="${game.ownerId || ''}" style="flex: 1;">
                     <i class="fa-solid fa-play"></i> ${t('game.launch')}
                 </button>
-                <button class="btn-icon game-info-btn" data-game-id="${game.id}" data-game-name="${game.name}" data-platform="${game.platform}" title="${t('gameinfo.title')}" style="width: 36px; height: 36px;">
+                <button class="btn-icon game-info-btn" data-game-id="${game.id}" data-game-name="${game.name}" data-platform="${game.platform}" title="${t('gameinfo.title')}" aria-label="${t('gameinfo.title')}" style="width: 36px; height: 36px;">
                     <i class="fa-solid fa-circle-info"></i>
                 </button>
             </div>
@@ -2990,7 +2993,7 @@ function createPlatformAccountCard(platform, accName, meta, hasActiveSession, is
         </div>
         <div class="card-actions">
             ${actionHtml}
-            <button class="btn-icon platform-dropdown-btn" data-platform="${platform}" data-account="${accName}">
+            <button class="btn-icon platform-dropdown-btn" data-platform="${platform}" data-account="${accName}" aria-label="${t('account.other_accounts')}">
                 <i class="fa-solid fa-ellipsis-vertical"></i>
             </button>
         </div>`;
