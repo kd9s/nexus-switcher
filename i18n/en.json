@@ -50,8 +50,7 @@
     "all_accounts": "All accounts",
     "choose_account": "Choose an account to sign in",
     "open_profile": "Open profile",
-    "login_hint": "Tap to sign in with this account"
-    ,
+    "login_hint": "Tap to sign in with this account",
     "rename": "Rename",
     "rename_prompt": "Type a new name for this account:",
     "rename_exists": "This name already exists"
@@ -152,7 +151,12 @@
     "booster_desc": "Clean RAM and close heavy programs when launching games",
     "manual_boost": "Boost Now",
     "boost_stats": "Boost complete! Freed {freed} MB | Closed {killed} apps",
-    "encryption_unavailable": "Encryption is not available on this system"
+    "encryption_unavailable": "Encryption is not available on this system",
+    "theme_blue": "Blue Theme",
+    "theme_green": "Green Theme",
+    "theme_pink": "Pink Theme",
+    "theme_purple": "Purple Theme",
+    "theme_yellow": "Yellow Theme"
   },
   "performance": {
     "cpu": "CPU",
@@ -209,7 +213,8 @@
     "copied_clipboard": "Copied to clipboard",
     "encryption_enabled": "Encryption enabled",
     "encryption_disabled": "Encryption disabled",
-    "language_changed": "Language changed"
+    "language_changed": "Language changed",
+    "close": "Close notification"
   },
   "servers": {
     "title": "Steam Server Status",

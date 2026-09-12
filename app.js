@@ -132,6 +132,10 @@ function applyTranslations() {
         el.title = t(el.getAttribute('data-i18n-title'));
     });
 
+    document.querySelectorAll('[data-i18n-aria-label]').forEach(el => {
+        el.setAttribute('aria-label', t(el.getAttribute('data-i18n-aria-label')));
+    });
+
 }
 
 loadTranslations();
@@ -2703,7 +2707,7 @@ function showToast(message, type = 'info', options = {}) {
             ${title ? `<div class="toast-title">${title}</div>` : ''}
             <div class="toast-message">${message}</div>
         </div>
-        <button class="toast-close" aria-label="close"><i class="fa-solid fa-xmark"></i></button>
+        <button class="toast-close" data-i18n-aria-label="toast.close" aria-label="${t('toast.close')}"><i class="fa-solid fa-xmark"></i></button>
     `;
     container.appendChild(toast);
     
