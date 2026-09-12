@@ -50,8 +50,7 @@
     "all_accounts": "جميع الحسابات",
     "choose_account": "اختر حساباً للدخول",
     "open_profile": "فتح الملف الشخصي",
-    "login_hint": "اضغط للدخول بهذا الحساب"
-    ,
+    "login_hint": "اضغط للدخول بهذا الحساب",
     "rename": "إعادة تسمية",
     "rename_prompt": "اكتب الاسم الجديد للحساب:",
     "rename_exists": "هذا الاسم موجود بالفعل"
@@ -152,7 +151,12 @@
     "booster_desc": "تنظيف الذاكرة وإغلاق البرامج الثقيلة عند تشغيل اللعبة",
     "manual_boost": "تعزيز يدوي الآن",
     "boost_stats": "تم التعزيز! تحرير {freed} MB | إغلاق {killed} برنامج",
-    "encryption_unavailable": "التشفير غير متاح في هذا النظام"
+    "encryption_unavailable": "التشفير غير متاح في هذا النظام",
+    "theme_blue": "مظهر أزرق",
+    "theme_green": "مظهر أخضر",
+    "theme_pink": "مظهر وردي",
+    "theme_purple": "مظهر بنفسجي",
+    "theme_yellow": "مظهر أصفر"
   },
   "performance": {
     "cpu": "المعالج",
@@ -209,7 +213,8 @@
     "copied_clipboard": "تم النسخ إلى الحافظة",
     "encryption_enabled": "تم تفعيل التشفير",
     "encryption_disabled": "تم تعطيل التشفير",
-    "language_changed": "تم تغيير اللغة"
+    "language_changed": "تم تغيير اللغة",
+    "close": "إغلاق الإشعار"
   },
   "servers": {
     "title": "حالة خوادم Steam",
