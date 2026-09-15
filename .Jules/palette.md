@@ -1,0 +1,3 @@
+## 2026-09-15 - [A11y/i18n Integration for Icon-Only Buttons]
+**Learning:** In a vanilla JS/HTML app using custom `data-i18n-*` attributes for translation, standard ARIA labels on icon-only buttons (like view toggles or refresh buttons) get missed or hardcoded in one language. Screen readers encounter empty or incorrectly labeled interactive elements.
+**Action:** When adding accessibility attributes to custom translation systems, implement a new custom attribute (e.g., `data-i18n-aria-label`) parallel to the existing system (`data-i18n-title`) in the JS processor. This ensures a11y strings stay in sync with the user's selected language.
