@@ -120,6 +120,25 @@ function getSessionRoots(info) {
     return [];
 }
 
+function isSafeAccountName(name) {
+    if (!name || name === '.' || name === '..') return false;
+    if (name.length > 80) return false;
+    if (/[<>:"/\\|?*\u0000-\u001F]/.test(name)) return false;
+    if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)/i.test(name)) return false;
+    return true;
+}
+
+function sessionSlotDir(platform, accountName) {
+    if (!PLATFORM_INFO[platform]) throw new Error('Unknown platform.');
+    const name = String(accountName || '').trim();
+    if (!isSafeAccountName(name)) throw new Error('Invalid account name.');
+    const base = path.resolve(SESSIONS_DIR, platform);
+    const target = path.resolve(base, name);
+    const rel = path.relative(base, target);
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('Invalid account name.');
+    return target;
+}
+
 function findEpicLauncherExe() {
     const candidates = [
         path.join('C:', 'Program Files (x86)', 'Epic Games', 'Launcher', 'Portal', 'Binaries', 'Win64', 'EpicGamesLauncher.exe'),
@@ -725,11 +744,15 @@ ipcMain.handle('save-platform-session', async (event, platform, accountName) => 
 
         await killPlatformProcesses(platform);
 
-        const targetDir = path.join(SESSIONS_DIR, platform, accountName);
-        if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+        const targetDir = sessionSlotDir(platform, accountName);
+        const createdDir = !fs.existsSync(targetDir);
+        if (createdDir) fs.mkdirSync(targetDir, { recursive: true });
 
         const savedCount = await saveSessionFromPlatform(info, targetDir, platform);
         if (savedCount === 0) {
+            if (createdDir) {
+                try { fs.rmSync(targetDir, { recursive: true, force: true }); } catch (e) {}
+            }
             throw new Error('Platform data not found. Open the launcher, log in, then save the session again.');
         }
 
@@ -741,10 +764,10 @@ ipcMain.handle('save-platform-session', async (event, platform, accountName) => 
 
 ipcMain.handle('switch-platform-session', async (event, platform, accountName) => {
     try {
+        const sourceDir = sessionSlotDir(platform, accountName);
         const info = PLATFORM_INFO[platform];
-        const sourceDir = path.join(SESSIONS_DIR, platform, accountName);
 
-        if (!info || !fs.existsSync(sourceDir)) throw new Error('Session not found.');
+        if (!fs.existsSync(sourceDir)) throw new Error('Session not found.');
 
         await killPlatformProcesses(platform);
 
@@ -758,7 +781,7 @@ ipcMain.handle('switch-platform-session', async (event, platform, accountName) =
             restored = await restoreSessionToPlatform(info, sourceDir, platform);
         }
         if (restored === 0) {
-            throw new Error('Session backup is empty or corrupted. Save the session again from Epic.');
+            throw new Error('Session backup is empty or corrupted. Save the session again.');
         }
 
         const state = readPlatformActiveState();
@@ -908,10 +931,23 @@ ipcMain.handle('get-platform-sessions', () => {
 
 ipcMain.handle('delete-platform-session', async (event, platform, accountName) => {
     try {
-        const sourceDir = path.join(SESSIONS_DIR, platform, accountName);
+        const sourceDir = sessionSlotDir(platform, accountName);
         if (fs.existsSync(sourceDir)) {
             fs.rmSync(sourceDir, { recursive: true, force: true });
         }
+        return { success: true };
+    } catch (e) {
+        return { success: false, error: e.message };
+    }
+});
+
+ipcMain.handle('rename-platform-session', async (event, platform, oldName, newName) => {
+    try {
+        const oldDir = sessionSlotDir(platform, oldName);
+        const newDir = sessionSlotDir(platform, newName);
+        if (path.resolve(oldDir) === path.resolve(newDir)) return { success: true };
+        if (fs.existsSync(newDir)) throw new Error('This name already exists.');
+        if (fs.existsSync(oldDir)) fs.renameSync(oldDir, newDir);
         return { success: true };
     } catch (e) {
         return { success: false, error: e.message };

@@ -651,24 +651,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         btn.addEventListener('click', () => {
             const platform = btn.getAttribute('data-platform');
             btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${t('launcher.launching')}`;
-            
+
             if (platform === 'steam') {
                 exec('start steam://');
-            } else if (platform === 'epic') {
-                exec('start com.epicgames.launcher://');
-            } else if (platform === 'battlenet') {
-                exec('start battlenet://');
             } else if (platform === 'xbox') {
                 exec('start xbox:');
-            } else if (platform === 'ea') {
-                const eaPath = 'C:\\Program Files\\Electronic Arts\\EA Desktop\\EA Desktop\\EADesktop.exe';
-                if (fs.existsSync(eaPath)) {
-                    exec(`start "" "${eaPath}"`);
-                } else {
-                    exec('start origin2://');
-                }
+            } else {
+                ipcRenderer.invoke('launch-platform', platform).catch((e) => console.error(e));
             }
-            
+
             setTimeout(() => {
                 btn.innerHTML = btn.getAttribute('data-launch-label') || t('launcher.launch');
             }, 2000);
@@ -705,7 +696,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
             
             btnBackup.disabled = false;
-            btnBackup.innerHTML = `<i class="fa-solid fa-copy"></i> ${t('backup.steam_backup_btn')}`;
+            btnBackup.innerHTML = `<i class="fa-solid fa-copy"></i> <span data-i18n="backup.steam_backup_btn">${t('backup.steam_backup_btn')}</span>`;
         });
     }
 
@@ -723,24 +714,24 @@ document.addEventListener('DOMContentLoaded', async () => {
             btnRestore.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${t('backup.restoring')}`;
             backupStatus.innerText = t('backup.steam_restoring');
             
+            const restoreBtnHtml = `<i class="fa-solid fa-rotate-left"></i> <span data-i18n="backup.steam_restore_btn">${t('backup.steam_restore_btn')}</span>`;
             try {
-                // Kill steam first
-                exec('taskkill /F /IM steam.exe /IM steamwebhelper.exe /T', async () => {
-                    await fs.promises.cp(path.join(backupDir, 'config'), path.join(steamPath, 'config'), { recursive: true, force: true });
-                    await fs.promises.cp(path.join(backupDir, 'userdata'), path.join(steamPath, 'userdata'), { recursive: true, force: true });
-                    
-                    backupStatus.innerText = t('backup.steam_restore_success');
-                    backupStatus.style.color = 'var(--success)';
-                    btnRestore.disabled = false;
-                    btnRestore.innerHTML = `<i class="fa-solid fa-rotate-left"></i> ${t('backup.steam_restore_btn')}`;
-                    loadSteamAccounts();
+                await new Promise((resolve) => {
+                    exec('taskkill /F /IM steam.exe /IM steamwebhelper.exe /T', () => resolve());
                 });
+                await fs.promises.cp(path.join(backupDir, 'config'), path.join(steamPath, 'config'), { recursive: true, force: true });
+                await fs.promises.cp(path.join(backupDir, 'userdata'), path.join(steamPath, 'userdata'), { recursive: true, force: true });
+
+                backupStatus.innerText = t('backup.steam_restore_success');
+                backupStatus.style.color = 'var(--success)';
+                loadSteamAccounts();
             } catch (err) {
                 console.error(err);
                 backupStatus.innerText = t('backup.error');
                 backupStatus.style.color = 'var(--danger)';
+            } finally {
                 btnRestore.disabled = false;
-                btnRestore.innerHTML = `<i class="fa-solid fa-rotate-left"></i> ${t('backup.steam_restore_btn')}`;
+                btnRestore.innerHTML = restoreBtnHtml;
             }
         });
     }
@@ -926,6 +917,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                 accName = generateAutoPlatformAccountName(selectedAddPlatform);
                 if (otherAccountNameInput) otherAccountNameInput.value = accName;
             }
+            if (!isSafeAccountName(accName)) {
+                showToast(t('modal.invalid_name'), 'warning');
+                return;
+            }
 
             isSavingPlatformSession = true;
             saveSessionBtn.disabled = true;
@@ -936,25 +931,27 @@ document.addEventListener('DOMContentLoaded', async () => {
                 addModalBusyText.textContent = t('modal.saving_session');
             }
 
+            let saved = false;
             try {
                 const res = await ipcRenderer.invoke('save-platform-session', selectedAddPlatform, accName);
-                if (res.success) {
+                if (res && res.success) {
                     mergePlatformAccountList(selectedAddPlatform, [accName]);
                     const saveMsg = selectedAddPlatform === 'epic'
                         ? t('platform.epic_save_hint')
-                        : (currentLang === 'ar' ? 'تم حفظ الجلسة بنجاح!' : 'Session saved successfully!');
+                        : t('toast.session_saved');
                     showToast(saveMsg, 'success', { duration: selectedAddPlatform === 'epic' ? 6000 : 3500 });
-                    closeAddAccountModal();
+                    saved = true;
                     await loadSteamAccounts();
                     if (typeof renderPlatformAccountsSections === 'function') await renderPlatformAccountsSections();
                 } else {
-                    showToast(res.error, 'error');
+                    showToast((res && res.error) || t('common.error'), 'error');
                 }
             } catch (e) {
                 showToast(e.message, 'error');
             } finally {
                 resetSaveSessionUi();
             }
+            if (saved) closeAddAccountModal();
         });
     }
 
@@ -969,8 +966,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         toggleAutoStartBtn.addEventListener('click', async () => {
             const currentState = toggleAutoStartBtn.classList.contains('active-acc-btn');
             toggleAutoStartBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
-            const newState = await ipcRenderer.invoke('set-autostart', !currentState);
-            updateAutoStartBtn(toggleAutoStartBtn, newState);
+            try {
+                const newState = await ipcRenderer.invoke('set-autostart', !currentState);
+                updateAutoStartBtn(toggleAutoStartBtn, newState);
+            } catch (e) {
+                updateAutoStartBtn(toggleAutoStartBtn, currentState);
+                showToast(e.message || t('common.error'), 'error');
+            }
         });
     }
 
@@ -1289,8 +1291,9 @@ async function reloadAccountsAfterSwitch() {
 
 async function loadSteamAccounts() {
     steamPath = await ipcRenderer.invoke('get-steam-path');
+    const accountsGrid = document.getElementById('accountsGrid');
     if (!steamPath) {
-        document.getElementById('accountsGrid').innerHTML = `<div class="info-box"><p>${t('steam.path_not_found')}</p></div>`;
+        if (accountsGrid) accountsGrid.innerHTML = `<div class="info-box"><p>${t('steam.path_not_found')}</p></div>`;
         return;
     }
 
@@ -1308,7 +1311,8 @@ async function loadSteamAccounts() {
 }
 
 function getAccountAvatarHtml(steamId, personaName) {
-    let avatarHtml = `<span>${personaName.charAt(0).toUpperCase()}</span>`;
+    const initial = (personaName || '?').charAt(0).toUpperCase();
+    let avatarHtml = `<span>${initial}</span>`;
     if (steamPath) {
         const avatarPath = path.join(steamPath, 'config', 'avatarcache', `${steamId}.png`);
         if (fs.existsSync(avatarPath)) {
@@ -1891,7 +1895,7 @@ async function loadInstalledGames() {
 
     grid.innerHTML = '';
     if (allGames.length === 0) {
-        grid.innerHTML = '<div class="info-box"><p>لم يتم العثور على ألعاب مثبتة.</p></div>';
+        grid.innerHTML = `<div class="info-box"><p>${t('game.none_installed')}</p></div>`;
         return;
     }
     
@@ -1902,7 +1906,7 @@ async function loadInstalledGames() {
         let bannerHtml = `
             <div class="profile-pic placeholder-pic" style="position: relative; width: 100%; height: 120px; border-radius: 12px; margin-bottom: 1rem; background: rgba(0,0,0,0.3); border: none;">
                 ${game.icon}
-                <button class="btn-icon change-cover-btn" data-game="${game.id || game.name}" style="position: absolute; top: 8px; right: 8px; width: 32px; height: 32px; background: rgba(0,0,0,0.6); border: none; z-index: 10; opacity: 0; transition: opacity 0.2s;" title="تغيير الغلاف">
+                <button class="btn-icon change-cover-btn" data-game="${game.id || game.name}" style="position: absolute; top: 8px; right: 8px; width: 32px; height: 32px; background: rgba(0,0,0,0.6); border: none; z-index: 10; opacity: 0; transition: opacity 0.2s;" title="${t('game.change_cover')}">
                     <i class="fa-solid fa-image" style="font-size: 1rem;"></i>
                 </button>
             </div>
@@ -1924,7 +1928,7 @@ async function loadInstalledGames() {
                     <div class="profile-pic placeholder-pic fallback-banner" style="display: none; width: 100%; height: 100%; border-radius: 12px; background: rgba(0,0,0,0.3); border: none; position: absolute; top: 0; left: 0; justify-content: center; align-items: center;">
                         ${game.icon}
                     </div>
-                    <button class="btn-icon change-cover-btn" data-game="${game.id || game.name}" style="position: absolute; top: 8px; right: 8px; width: 32px; height: 32px; background: rgba(0,0,0,0.6); border: none; z-index: 10; opacity: 0; transition: opacity 0.2s;" title="تغيير الغلاف">
+                    <button class="btn-icon change-cover-btn" data-game="${game.id || game.name}" style="position: absolute; top: 8px; right: 8px; width: 32px; height: 32px; background: rgba(0,0,0,0.6); border: none; z-index: 10; opacity: 0; transition: opacity 0.2s;" title="${t('game.change_cover')}">
                         <i class="fa-solid fa-image" style="font-size: 1rem;"></i>
                     </button>
                 </div>
@@ -2031,7 +2035,7 @@ async function loadInstalledGames() {
             const popup = document.createElement('div');
             popup.className = 'assign-popup';
             
-            let popupHtml = `<p style="font-size: 0.8rem; color: var(--text-muted); padding: 0.5rem 0.8rem; border-bottom: 1px solid var(--border); margin-bottom: 0.3rem; white-space: nowrap;">تعيين حساب لـ <strong style="color: var(--text-main);">${gameName}</strong></p>`;
+            let popupHtml = `<p style="font-size: 0.8rem; color: var(--text-muted); padding: 0.5rem 0.8rem; border-bottom: 1px solid var(--border); margin-bottom: 0.3rem; white-space: nowrap;">${t('game.assign_for')} <strong style="color: var(--text-main);">${gameName}</strong></p>`;
             
             accounts.forEach(acc => {
                 const isLinked = gameAccounts[gameId] === acc.name;
@@ -2051,7 +2055,7 @@ async function loadInstalledGames() {
                 popupHtml += `<hr style="border: 0; border-top: 1px solid var(--border); margin: 0.3rem 0;">`;
                 popupHtml += `
                     <button class="assign-acc-option" data-game-id="${gameId}" data-account="" style="width: 100%; display: flex; flex-direction: row-reverse; align-items: center; gap: 0.5rem; padding: 0.6rem 0.8rem; background: transparent; border: none; border-radius: 8px; color: var(--danger); cursor: pointer; font-size: 0.85rem; font-family: inherit; justify-content: flex-end;">
-                        <i class="fa-solid fa-xmark"></i> إزالة التعيين
+                        <i class="fa-solid fa-xmark"></i> ${t('game.remove_assignment')}
                     </button>
                 `;
             }
@@ -2167,14 +2171,9 @@ async function loadInstalledGames() {
 }
 
 function getPlatformName(platform) {
-    switch(platform) {
-        case 'steam': return 'ستيم';
-        case 'epic': return 'إيبيك قيمز';
-        case 'xbox': return 'إكس بوكس';
-        case 'battlenet': return 'باتل نت';
-        case 'ea': return 'إي أيه أب';
-        default: return platform;
-    }
+    const key = `platforms.${platform}`;
+    const label = t(key);
+    return label === key ? platform : label;
 }
 
 // Steam Status Checker
@@ -2998,6 +2997,14 @@ async function getPlatformSessionInfo(platform) {
     return { running, activeAccount, lastActive };
 }
 
+function isSafeAccountName(name) {
+    if (!name || name === '.' || name === '..') return false;
+    if (name.length > 80) return false;
+    if (/[<>:"/\\|?*\u0000-\u001F]/.test(name)) return false;
+    if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)/i.test(name)) return false;
+    return true;
+}
+
 function launchPlatformApp(platform) {
     const meta = PLATFORM_META[platform];
     if (meta && meta.launch) meta.launch();
@@ -3097,32 +3104,37 @@ function renderPlatformHero(heroEl, platform, meta, sessionInfo, activeAccount) 
 function bindPlatformAccountActions(sectionEl) {
     sectionEl.querySelectorAll('.platform-login-btn, .platform-switch-btn').forEach(btn => {
         btn.addEventListener('click', async function() {
+            if (isSwitchingPlatform) return;
             const platform = this.getAttribute('data-platform');
             const accName = this.getAttribute('data-account');
-            const isLogin = this.classList.contains('platform-login-btn');
 
             this.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> ${t('account.switching')}`;
             this.style.pointerEvents = 'none';
 
             isSwitchingPlatform = true;
-            const res = await ipcRenderer.invoke('switch-platform-session', platform, accName);
-            if (res.success) {
-                await ipcRenderer.invoke('set-platform-active-state', platform, accName);
-                const waitMsg = platform === 'epic'
-                    ? (currentLang === 'ar' ? 'جاري فتح Epic... انتظر حتى يظهر الحساب' : 'Opening Epic... wait for the account to load')
-                    : `${t('toast.account_switched')}: ${accName}`;
-                showToast(waitMsg, 'success', { duration: platform === 'epic' ? 5000 : 3500 });
-                if (!res.launched) launchPlatformApp(platform);
-                const delays = platform === 'epic' ? [3000, 6000, 12000] : [1500, 4000, 8000];
-                for (const ms of delays) {
-                    await new Promise(r => setTimeout(r, ms));
-                    await renderPlatformAccountsSections();
+            try {
+                const res = await ipcRenderer.invoke('switch-platform-session', platform, accName);
+                if (res && res.success) {
+                    await ipcRenderer.invoke('set-platform-active-state', platform, accName);
+                    const waitMsg = platform === 'epic'
+                        ? t('toast.epic_opening')
+                        : `${t('toast.account_switched')}: ${accName}`;
+                    showToast(waitMsg, 'success', { duration: platform === 'epic' ? 5000 : 3500 });
+                    if (!res.launched) launchPlatformApp(platform);
+                    const delays = platform === 'epic' ? [3000, 6000, 12000] : [1500, 4000, 8000];
+                    for (const ms of delays) {
+                        await new Promise(r => setTimeout(r, ms));
+                        await renderPlatformAccountsSections();
+                    }
+                } else {
+                    showToast((res && res.error) || t('toast.account_switch_failed'), 'error');
                 }
-            } else {
-                showToast(res.error, 'error');
+            } catch (e) {
+                showToast(e.message || t('toast.account_switch_failed'), 'error');
+            } finally {
+                isSwitchingPlatform = false;
+                await renderPlatformAccountsSections();
             }
-            isSwitchingPlatform = false;
-            await renderPlatformAccountsSections();
         });
     });
 
@@ -3159,8 +3171,22 @@ function bindPlatformAccountActions(sectionEl) {
             popup.querySelector('.rename-platform-btn')?.addEventListener('click', async () => {
                 const newName = (prompt(t('account.rename_prompt'), accName) || '').trim();
                 if (!newName || newName === accName) return;
-                if (platformAccountsCatalog?.[platform]?.includes(newName)) {
+                if (!isSafeAccountName(newName)) {
+                    showToast(t('modal.invalid_name'), 'warning');
+                    return;
+                }
+                const sessions = await ipcRenderer.invoke('get-platform-sessions');
+                const taken = new Set([
+                    ...(platformAccountsCatalog?.[platform] || []),
+                    ...((sessions && sessions[platform]) || [])
+                ]);
+                if (taken.has(newName)) {
                     showToast(t('account.rename_exists'), 'warning');
+                    return;
+                }
+                const renamed = await ipcRenderer.invoke('rename-platform-session', platform, accName, newName);
+                if (!renamed || !renamed.success) {
+                    showToast((renamed && renamed.error) || t('account.rename_failed'), 'error');
                     return;
                 }
                 // Update catalog

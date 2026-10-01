@@ -54,7 +54,8 @@
     ,
     "rename": "Rename",
     "rename_prompt": "Type a new name for this account:",
-    "rename_exists": "This name already exists"
+    "rename_exists": "This name already exists",
+    "rename_failed": "Could not rename this account"
   },
   "launcher": {
     "launch": "Launch platform",
@@ -99,7 +100,20 @@
     "hours": "h",
     "minutes": "m",
     "never_played": "Not played yet",
-    "last_played": "Last played"
+    "last_played": "Last played",
+    "none_installed": "No installed games were found.",
+    "searching": "Looking for installed games...",
+    "change_cover": "Change cover",
+    "assign_for": "Assign an account for"
+  },
+  "platforms": {
+    "steam": "Steam",
+    "epic": "Epic Games",
+    "xbox": "Xbox",
+    "battlenet": "Battle.net",
+    "ea": "EA App",
+    "riot": "Riot Games",
+    "ubisoft": "Ubisoft Connect"
   },
   "backup": {
     "title": "Backup",
@@ -185,7 +199,8 @@
     "epic_new_login_hint": "To add a new account without signing out: save your current account first, then press “Log in with another account” to open the launcher on the login screen.",
     "epic_new_login_working": "Closing the launcher and preparing the login screen...",
     "epic_new_login_done": "Sign in to the launcher with the new account, then come back, type its name and save the session.",
-    "epic_new_login_failed": "Could not prepare a new session"
+    "epic_new_login_failed": "Could not prepare a new session",
+    "invalid_name": "That account name cannot be used. Avoid reserved names and these characters: \\ / : * ? < > |"
   },
   "common": {
     "yes": "Yes",
@@ -214,7 +229,9 @@
     "copied_clipboard": "Copied to clipboard",
     "encryption_enabled": "Encryption enabled",
     "encryption_disabled": "Encryption disabled",
-    "language_changed": "Language changed"
+    "language_changed": "Language changed",
+    "session_saved": "Session saved successfully",
+    "epic_opening": "Opening Epic... wait for the account to load"
   },
   "servers": {
     "title": "Steam Server Status",
