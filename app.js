@@ -61,6 +61,27 @@ async function readEncryptedJson(filePath, fallback = {}) {
     } catch(e) { console.error('readEncryptedJson:', filePath, e); return fallback; }
 }
 
+async function copyTreeBestEffort(src, dest) {
+    if (!fs.existsSync(src)) return 0;
+    await fs.promises.mkdir(dest, { recursive: true });
+    const entries = await fs.promises.readdir(src, { withFileTypes: true });
+    let copied = 0;
+    for (const entry of entries) {
+        const from = path.join(src, entry.name);
+        const to = path.join(dest, entry.name);
+        try {
+            if (entry.isDirectory()) copied += await copyTreeBestEffort(from, to);
+            else if (entry.isFile()) {
+                await fs.promises.writeFile(to, await fs.promises.readFile(from));
+                copied++;
+            }
+        } catch (e) {
+            console.error('copy skipped', from, e.message);
+        }
+    }
+    return copied;
+}
+
 async function writeEncryptedJson(filePath, data) {
     try {
         const json = JSON.stringify(data, null, 2);
@@ -173,12 +194,12 @@ async function initDataStorage() {
         } catch (e) {}
     }
 
-    customCovers = await readEncryptedJson(coversFile, {});
-    gameAccounts = await readEncryptedJson(gameAccountsFile, {});
-    accountNotes = await readEncryptedJson(accountNotesFile, {});
-    playtimeData = await readEncryptedJson(playtimeFile, {});
+    customCovers = asPlainObject(await readEncryptedJson(coversFile, {}));
+    gameAccounts = asPlainObject(await readEncryptedJson(gameAccountsFile, {}));
+    accountNotes = asPlainObject(await readEncryptedJson(accountNotesFile, {}));
+    playtimeData = asPlainObject(await readEncryptedJson(playtimeFile, {}));
     steamAccountsCatalog = normalizeSteamUsers(await readEncryptedJson(steamCatalogFile, {}));
-    platformAccountsCatalog = await readEncryptedJson(platformCatalogFile, {});
+    platformAccountsCatalog = asPlainObject(await readEncryptedJson(platformCatalogFile, {}));
 }
 
 const appInitPromise = initDataStorage();
@@ -243,7 +264,7 @@ function endGameSession(gameId) {
         return;
     }
     
-    if (!playtimeData[gameId]) {
+    if (!playtimeData[gameId] || typeof playtimeData[gameId] !== 'object') {
         playtimeData[gameId] = { totalSeconds: 0, lastPlayed: 0, sessions: 0, name: session.gameName };
     }
     playtimeData[gameId].totalSeconds += duration;
@@ -313,7 +334,7 @@ async function getActiveSteamSession(users) {
 
     if (!accountName) {
         for (const steamId of Object.keys(users)) {
-            if (users[steamId].MostRecent === '1') {
+            if (textValue(users[steamId].MostRecent) === '1') {
                 accountName = users[steamId].AccountName;
                 break;
             }
@@ -393,7 +414,7 @@ function buildGameOwnershipMap() {
         try {
             const localConfigPath = path.join(userPath, 'config', 'localconfig.vdf');
             if (fs.existsSync(localConfigPath)) {
-                const configContent = fs.readFileSync(localConfigPath, 'utf-8');
+                const configContent = readTextFile(localConfigPath);
                 const parsed = vdf.parse(configContent);
                 const root = parsed.UserLocalConfigStore || parsed.userLocalConfigStore || {};
                 const software = root.Software || root.software || {};
@@ -545,7 +566,11 @@ function runGameBoost() {
         const enabledProcesses = boosterProcesses.filter(p => p.enabled);
         if (enabledProcesses.length === 0) return resolve({ freed: 0, killed: 0 });
 
-        const processNames = enabledProcesses.map(p => `/IM ${p.name}`).join(' ');
+        const names = enabledProcesses
+            .map(p => textValue(p.name).replace(/"/g, ''))
+            .filter(name => /^[\w.\- ]+\.exe$/i.test(name));
+        if (names.length === 0) return resolve({ freed: 0, killed: 0 });
+        const processNames = names.map(name => `/IM "${name}"`).join(' ');
         exec(`taskkill /F ${processNames}`, () => {
             // Flush standby memory via PowerShell (best-effort)
             exec('powershell -Command "[System.GC]::Collect()"', () => {
@@ -553,7 +578,7 @@ function runGameBoost() {
                     const memAfter = getMemoryInfo();
                     const freedMB = Math.max(0, Math.round((parseFloat(memBefore.usedGB) - parseFloat(memAfter.usedGB)) * 1024));
                     updateMemoryUI();
-                    resolve({ freed: freedMB, killed: enabledProcesses.length });
+                    resolve({ freed: freedMB, killed: names.length });
                 }, 1500);
             });
         });
@@ -576,13 +601,16 @@ function renderBoosterProcessList() {
     const listEl = document.getElementById('boosterProcessList');
     if (!listEl) return;
     listEl.innerHTML = '';
+    if (!Array.isArray(boosterProcesses)) return;
     boosterProcesses.forEach((proc, index) => {
+        if (!proc || typeof proc !== 'object') return;
         const item = document.createElement('div');
         item.className = 'booster-process-item';
         item.style.cssText = `display: flex; align-items: center; gap: 0.6rem; padding: 0.6rem 0.8rem; background: ${proc.enabled ? 'rgba(59,130,246,0.08)' : 'rgba(255,255,255,0.02)'}; border: 1px solid ${proc.enabled ? 'rgba(59,130,246,0.2)' : 'var(--border)'}; border-radius: 10px; cursor: pointer; transition: all 0.2s; user-select: none;`;
+        const icon = /^[a-z0-9\-\s]+$/i.test(textValue(proc.icon)) ? proc.icon : 'fa-solid fa-circle';
         item.innerHTML = `
-            <i class="${proc.icon}" style="font-size: 1.1rem; width: 20px; text-align: center; color: ${proc.enabled ? 'var(--primary)' : 'var(--text-muted)'};"></i>
-            <span style="flex: 1; font-size: 0.85rem; color: ${proc.enabled ? 'var(--text-main)' : 'var(--text-muted)'};">${proc.label}</span>
+            <i class="${icon}" style="font-size: 1.1rem; width: 20px; text-align: center; color: ${proc.enabled ? 'var(--primary)' : 'var(--text-muted)'};"></i>
+            <span style="flex: 1; font-size: 0.85rem; color: ${proc.enabled ? 'var(--text-main)' : 'var(--text-muted)'};">${escapeHtml(proc.label)}</span>
             <i class="fa-solid ${proc.enabled ? 'fa-toggle-on' : 'fa-toggle-off'}" style="font-size: 1.2rem; color: ${proc.enabled ? 'var(--primary)' : 'var(--text-muted)'};"></i>
         `;
         item.addEventListener('click', () => {
@@ -676,27 +704,29 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (!steamPath) return;
             btnBackup.disabled = true;
             btnBackup.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${t('backup.backing_up')}`;
-            backupStatus.innerText = t('backup.steam_copying');
+            const setStatus = (text, color) => {
+                if (!backupStatus) return;
+                backupStatus.innerText = text;
+                if (color) backupStatus.style.color = color;
+            };
+            setStatus(t('backup.steam_copying'));
             
             try {
                 const backupDir = path.join(os.homedir(), 'Documents', 'NexusSteamBackup');
                 if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
                 
-                // Backup config
-                await fs.promises.cp(path.join(steamPath, 'config'), path.join(backupDir, 'config'), { recursive: true, force: true });
-                // Backup userdata (can be large, but important)
-                await fs.promises.cp(path.join(steamPath, 'userdata'), path.join(backupDir, 'userdata'), { recursive: true, force: true });
+                const configCopied = await copyTreeBestEffort(path.join(steamPath, 'config'), path.join(backupDir, 'config'));
+                const userCopied = await copyTreeBestEffort(path.join(steamPath, 'userdata'), path.join(backupDir, 'userdata'));
+                if (!configCopied && !userCopied) throw new Error('nothing copied');
                 
-                backupStatus.innerText = t('backup.steam_success');
-                backupStatus.style.color = 'var(--success)';
+                setStatus(t('backup.steam_success'), 'var(--success)');
             } catch (err) {
                 console.error(err);
-                backupStatus.innerText = t('backup.error');
-                backupStatus.style.color = 'var(--danger)';
+                setStatus(t('backup.error'), 'var(--danger)');
+            } finally {
+                btnBackup.disabled = false;
+                btnBackup.innerHTML = `<i class="fa-solid fa-copy"></i> <span data-i18n="backup.steam_backup_btn">${t('backup.steam_backup_btn')}</span>`;
             }
-            
-            btnBackup.disabled = false;
-            btnBackup.innerHTML = `<i class="fa-solid fa-copy"></i> <span data-i18n="backup.steam_backup_btn">${t('backup.steam_backup_btn')}</span>`;
         });
     }
 
@@ -704,31 +734,34 @@ document.addEventListener('DOMContentLoaded', async () => {
         btnRestore.addEventListener('click', async () => {
             if (!steamPath) return;
             const backupDir = path.join(os.homedir(), 'Documents', 'NexusSteamBackup');
+            const setStatus = (text, color) => {
+                if (!backupStatus) return;
+                backupStatus.innerText = text;
+                if (color) backupStatus.style.color = color;
+            };
             if (!fs.existsSync(backupDir)) {
-                backupStatus.innerText = t('backup.steam_no_backup');
-                backupStatus.style.color = 'var(--danger)';
+                setStatus(t('backup.steam_no_backup'), 'var(--danger)');
                 return;
             }
             
             btnRestore.disabled = true;
             btnRestore.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${t('backup.restoring')}`;
-            backupStatus.innerText = t('backup.steam_restoring');
+            setStatus(t('backup.steam_restoring'));
             
             const restoreBtnHtml = `<i class="fa-solid fa-rotate-left"></i> <span data-i18n="backup.steam_restore_btn">${t('backup.steam_restore_btn')}</span>`;
             try {
                 await new Promise((resolve) => {
                     exec('taskkill /F /IM steam.exe /IM steamwebhelper.exe /T', () => resolve());
                 });
-                await fs.promises.cp(path.join(backupDir, 'config'), path.join(steamPath, 'config'), { recursive: true, force: true });
-                await fs.promises.cp(path.join(backupDir, 'userdata'), path.join(steamPath, 'userdata'), { recursive: true, force: true });
+                const configCopied = await copyTreeBestEffort(path.join(backupDir, 'config'), path.join(steamPath, 'config'));
+                const userCopied = await copyTreeBestEffort(path.join(backupDir, 'userdata'), path.join(steamPath, 'userdata'));
+                if (!configCopied && !userCopied) throw new Error('nothing copied');
 
-                backupStatus.innerText = t('backup.steam_restore_success');
-                backupStatus.style.color = 'var(--success)';
+                setStatus(t('backup.steam_restore_success'), 'var(--success)');
                 loadSteamAccounts();
             } catch (err) {
                 console.error(err);
-                backupStatus.innerText = t('backup.error');
-                backupStatus.style.color = 'var(--danger)';
+                setStatus(t('backup.error'), 'var(--danger)');
             } finally {
                 btnRestore.disabled = false;
                 btnRestore.innerHTML = restoreBtnHtml;
@@ -741,7 +774,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (refreshBtn) {
         refreshBtn.addEventListener('click', async () => {
             const icon = refreshBtn.querySelector('i');
-            icon.classList.add('fa-spin');
+            if (icon) icon.classList.add('fa-spin');
             refreshBtn.disabled = true;
             try {
                 await loadSteamAccounts();
@@ -750,7 +783,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
             } catch (e) { console.error(e); }
             setTimeout(() => {
-                icon.classList.remove('fa-spin');
+                if (icon) icon.classList.remove('fa-spin');
                 refreshBtn.disabled = false;
             }, 500);
         });
@@ -1148,15 +1181,18 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const res = await ipcRenderer.invoke('check-updates');
                 const isAr = typeof currentLang !== 'undefined' ? currentLang === 'ar' : true;
                 
-                if (res.success) {
+                if (res && res.success && updateStatus) {
+                    const latest = escapeHtml(res.latest);
+                    const current = escapeHtml(res.current);
+                    const updateUrl = /^https:\/\//i.test(textValue(res.url)) ? escapeHtml(res.url) : '';
                     if (res.hasUpdate) {
                         updateStatus.innerHTML = `
                             <div style="padding: 0.75rem; background: rgba(108, 203, 95, 0.1); border: 1px solid rgba(108, 203, 95, 0.3); border-radius: var(--radius-sm);">
-                                <strong style="color: var(--success);"><i class="fa-solid fa-circle-check"></i> ${isAr ? 'يتوفر تحديث جديد!' : 'Update Available!'} (v${res.latest})</strong>
-                                <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: 0.25rem;">${isAr ? 'الإصدار الحالي:' : 'Current Version:'} v${res.current}</p>
-                                <button class="btn btn-primary" id="downloadUpdateBtn" data-url="${res.url}" style="margin-top: 0.5rem; padding: 0.4rem 0.75rem; font-size: 0.85rem;">
+                                <strong style="color: var(--success);"><i class="fa-solid fa-circle-check"></i> ${isAr ? 'يتوفر تحديث جديد!' : 'Update Available!'} (v${latest})</strong>
+                                <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: 0.25rem;">${isAr ? 'الإصدار الحالي:' : 'Current Version:'} v${current}</p>
+                                ${updateUrl ? `<button class="btn btn-primary" id="downloadUpdateBtn" data-url="${updateUrl}" style="margin-top: 0.5rem; padding: 0.4rem 0.75rem; font-size: 0.85rem;">
                                     <i class="fa-solid fa-download"></i> ${isAr ? 'تحميل التحديث' : 'Download Update'}
-                                </button>
+                                </button>` : ''}
                             </div>
                         `;
                         const downloadBtn = document.getElementById('downloadUpdateBtn');
@@ -1169,11 +1205,11 @@ document.addEventListener('DOMContentLoaded', async () => {
                         updateStatus.innerHTML = `
                             <div style="padding: 0.75rem; background: rgba(255, 255, 255, 0.05); border: 1px solid var(--border); border-radius: var(--radius-sm);">
                                 <strong><i class="fa-solid fa-check" style="color: var(--text-muted);"></i> ${isAr ? 'أنت تستخدم أحدث إصدار' : 'You are using the latest version'}</strong>
-                                <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: 0.25rem;">v${res.current}</p>
+                                <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: 0.25rem;">v${current}</p>
                             </div>
                         `;
                     }
-                } else {
+                } else if (updateStatus) {
                     updateStatus.innerHTML = `
                         <div style="padding: 0.75rem; background: rgba(255, 71, 71, 0.1); border: 1px solid rgba(255, 71, 71, 0.3); border-radius: var(--radius-sm);">
                             <strong style="color: var(--danger);"><i class="fa-solid fa-circle-exclamation"></i> ${isAr ? 'حدث خطأ أثناء البحث عن تحديثات' : 'Error checking for updates'}</strong>
@@ -1202,6 +1238,87 @@ function textValue(value) {
     return String(value);
 }
 
+function escapeHtml(value) {
+    return textValue(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+function isPlainObject(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function asPlainObject(value) {
+    return isPlainObject(value) ? value : {};
+}
+
+function removeVdfUserBlock(content, steamId) {
+    const id = textValue(steamId).replace(/[^\d]/g, '');
+    if (!id) return null;
+    const nl = content.includes('\r\n') ? '\r\n' : '\n';
+    const lines = content.split(/\r?\n/);
+    const idLine = new RegExp(`^\\s*"${id}"\\s*$`);
+    const out = [];
+    let skipping = false;
+    let depth = 0;
+    let removed = false;
+    for (const line of lines) {
+        if (!skipping && idLine.test(line)) {
+            skipping = true;
+            depth = 0;
+            removed = true;
+            continue;
+        }
+        if (skipping) {
+            for (const ch of line) {
+                if (ch === '{') depth++;
+                else if (ch === '}') depth--;
+            }
+            if (depth <= 0 && line.includes('}')) skipping = false;
+            continue;
+        }
+        out.push(line);
+    }
+    return removed ? out.join(nl) : null;
+}
+
+function steamLibraryRoots() {
+    const roots = [];
+    const push = (candidate) => {
+        const clean = textValue(candidate).trim().replace(/[\\/]+$/, '');
+        if (!clean || !fs.existsSync(clean)) return;
+        if (roots.some(root => root.toLowerCase() === clean.toLowerCase())) return;
+        roots.push(clean);
+    };
+    if (steamPath) push(steamPath);
+    if (!steamPath) return roots;
+    try {
+        const libraryFoldersPath = path.join(steamPath, 'steamapps', 'libraryfolders.vdf');
+        if (!fs.existsSync(libraryFoldersPath)) return roots;
+        const libVdf = vdf.parse(readTextFile(libraryFoldersPath));
+        const folders = libVdf.libraryfolders || libVdf.LibraryFolders || libVdf.libraryFolders || {};
+        if (folders && typeof folders === 'object') {
+            for (const key of Object.keys(folders)) {
+                const lib = folders[key];
+                push(typeof lib === 'string' ? lib : (lib && (lib.path || lib.Path)));
+            }
+        }
+    } catch (e) {
+        console.error('steamLibraryRoots', e);
+    }
+    return roots;
+}
+
+function readTextFile(filePath) {
+    const buf = fs.readFileSync(filePath);
+    if (buf.length >= 2 && buf[0] === 0xFF && buf[1] === 0xFE) return buf.toString('utf16le');
+    if (buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF) return buf.toString('utf8').replace(/^\uFEFF/, '');
+    if (buf.length > 8 && buf[1] === 0 && buf[3] === 0 && buf[5] === 0) return buf.toString('utf16le');
+    return buf.toString('utf8');
+}
+
 function normalizeSteamUsers(users) {
     if (!users || typeof users !== 'object' || Array.isArray(users)) return {};
     const result = {};
@@ -1215,7 +1332,10 @@ function normalizeSteamUsers(users) {
         result[steamId] = {
             ...u,
             AccountName: accountName,
-            PersonaName: textValue(u.PersonaName).trim() || accountName
+            PersonaName: textValue(u.PersonaName).trim() || accountName,
+            MostRecent: textValue(u.MostRecent),
+            RememberPassword: textValue(u.RememberPassword),
+            AllowAutoLogin: textValue(u.AllowAutoLogin)
         };
     }
     return result;
@@ -1287,19 +1407,22 @@ function snapshotSteamAccountsBeforeSwitch() {
     const vdfPath = path.join(steamPath, 'config', 'loginusers.vdf');
     if (!fs.existsSync(vdfPath)) return;
     try {
-        const content = fs.readFileSync(vdfPath, 'utf-8');
+        const content = readTextFile(vdfPath);
         persistCatalogFromUsers(parseLoginUsersFromVdf(content));
     } catch (e) {}
 }
 
 async function reloadAccountsAfterSwitch() {
-    const delays = [1500, 4000, 8000, 12000];
-    for (const ms of delays) {
-        await new Promise(r => setTimeout(r, ms));
-        await loadSteamAccounts();
-        if (typeof renderPlatformAccountsSections === 'function') await renderPlatformAccountsSections();
+    try {
+        const delays = [1500, 4000, 8000, 12000];
+        for (const ms of delays) {
+            await new Promise(r => setTimeout(r, ms));
+            await loadSteamAccounts();
+            if (typeof renderPlatformAccountsSections === 'function') await renderPlatformAccountsSections();
+        }
+    } finally {
+        isSwitchingAccount = false;
     }
-    isSwitchingAccount = false;
 }
 
 async function loadSteamAccounts() {
@@ -1311,20 +1434,23 @@ async function loadSteamAccounts() {
     }
 
     const vdfPath = path.join(steamPath, 'config', 'loginusers.vdf');
-    
-    // NOTE: fs.watch() auto-reload removed by request. Use refreshAccountsBtn for manual refresh.
+
+    // A locked or unreadable loginusers.vdf must not hide accounts already saved
+    // in the catalog. Render whatever we can.
+    let freshUsers = {};
     try {
-        const vdfContent = fs.readFileSync(vdfPath, 'utf-8');
-        const freshUsers = parseLoginUsersFromVdf(vdfContent);
-        loginUsers = buildDisplayUsers(freshUsers);
-        await renderAccountsGrid(loginUsers);
+        if (fs.existsSync(vdfPath)) {
+            freshUsers = parseLoginUsersFromVdf(readTextFile(vdfPath));
+        }
     } catch (error) {
         console.error('Error reading loginusers.vdf:', error);
     }
+    loginUsers = buildDisplayUsers(freshUsers);
+    await renderAccountsGrid(loginUsers);
 }
 
 function getAccountAvatarHtml(steamId, personaName) {
-    const initial = (personaName || '?').charAt(0).toUpperCase();
+    const initial = (textValue(personaName) || '?').charAt(0).toUpperCase();
     let avatarHtml = `<span>${initial}</span>`;
     if (steamPath) {
         const avatarPath = path.join(steamPath, 'config', 'avatarcache', `${steamId}.png`);
@@ -1357,8 +1483,9 @@ function renderSessionHero(heroEl, session, users, hasActiveSession, accountCoun
         const stats = accountStats[activeSteamId] || { gameCount: 0, walletBalance: null };
         const avatarHtml = getAccountAvatarHtml(activeSteamId, personaName);
         let walletLine = '';
-        if (stats.walletBalance !== null && stats.walletBalance !== undefined) {
-            const balance = (parseInt(stats.walletBalance) / 100).toFixed(2);
+        const walletCents = parseInt(stats.walletBalance, 10);
+        if (!Number.isNaN(walletCents)) {
+            const balance = (walletCents / 100).toFixed(2);
             walletLine = `<span class="meta-item"><i class="fa-solid fa-wallet"></i> ${balance}</span>`;
         }
 
@@ -1369,9 +1496,9 @@ function renderSessionHero(heroEl, session, users, hasActiveSession, accountCoun
                     <div class="session-hero-avatar">${avatarHtml}</div>
                     <div class="session-hero-info">
                         <span class="session-badge session-badge--online"><span class="pulse-dot"></span> ${t('account.logged_in')}</span>
-                        <h2>${personaName}</h2>
+                        <h2>${escapeHtml(personaName)}</h2>
                         <div class="session-hero-meta">
-                            <span class="meta-item"><i class="fa-solid fa-user"></i> ${activeUser.AccountName}</span>
+                            <span class="meta-item"><i class="fa-solid fa-user"></i> ${escapeHtml(activeUser.AccountName)}</span>
                             <span class="meta-item"><i class="fa-solid fa-gamepad"></i> ${stats.gameCount} ${t('account.games_owned')}</span>
                             ${walletLine}
                             <span class="meta-item"><i class="fa-brands fa-steam"></i> ${t('steam.steam_online')}</span>
@@ -1385,7 +1512,8 @@ function renderSessionHero(heroEl, session, users, hasActiveSession, accountCoun
                 </div>
             </div>`;
         document.getElementById('openSteamProfileBtn')?.addEventListener('click', () => {
-            ipcRenderer.invoke('open-external', `https://steamcommunity.com/profiles/${activeSteamId}/`);
+            const profileId = textValue(activeSteamId).replace(/[^\d]/g, '');
+            if (profileId) ipcRenderer.invoke('open-external', `https://steamcommunity.com/profiles/${profileId}/`);
         });
         return;
     }
@@ -1429,13 +1557,18 @@ function renderSessionHero(heroEl, session, users, hasActiveSession, accountCoun
 
 function createAccountCard(steamId, user, { hasActiveSession, isCurrent, pickMode }) {
     const personaName = user.PersonaName || user.AccountName;
+    const safePersona = escapeHtml(personaName);
+    const safeAccount = escapeHtml(user.AccountName);
+    const safeSteamId = escapeHtml(steamId);
     const stats = accountStats[steamId] || { gameCount: 0, walletBalance: null };
-    const hasNotes = accountNotes[steamId] && accountNotes[steamId].trim().length > 0;
+    const noteText = accountNotes[steamId];
+    const hasNotes = typeof noteText === 'string' && noteText.trim().length > 0;
     const avatarHtml = getAccountAvatarHtml(steamId, personaName);
 
     let walletHtml = '';
-    if (stats.walletBalance !== null && stats.walletBalance !== undefined) {
-        const balance = (parseInt(stats.walletBalance) / 100).toFixed(2);
+    const walletCents = parseInt(stats.walletBalance, 10);
+    if (!Number.isNaN(walletCents)) {
+        const balance = (walletCents / 100).toFixed(2);
         walletHtml = `<span class="stat-pill" title="${t('account.wallet_balance')}"><i class="fa-solid fa-wallet"></i> ${balance}</span>`;
     }
 
@@ -1444,12 +1577,12 @@ function createAccountCard(steamId, user, { hasActiveSession, isCurrent, pickMod
     if (isCurrent) {
         actionHtml = `<button class="btn btn-switch disabled" disabled><i class="fa-solid fa-circle-check"></i> ${t('account.logged_in')}</button>`;
     } else if (!hasActiveSession) {
-        actionHtml = `<button class="btn btn-login-acc login-acc-btn" data-account="${user.AccountName}">
+        actionHtml = `<button class="btn btn-login-acc login-acc-btn" data-account="${safeAccount}">
             <i class="fa-solid fa-right-to-bracket"></i> ${t('account.login')}
         </button>`;
         loginHint = `<p class="card-login-hint">${t('account.login_hint')}</p>`;
     } else {
-        actionHtml = `<button class="btn btn-switch-acc switch-acc-btn" data-account="${user.AccountName}">
+        actionHtml = `<button class="btn btn-switch-acc switch-acc-btn" data-account="${safeAccount}">
             <i class="fa-solid fa-arrow-right-arrow-left"></i> ${t('account.switch')}
         </button>`;
     }
@@ -1460,13 +1593,13 @@ function createAccountCard(steamId, user, { hasActiveSession, isCurrent, pickMod
     card.innerHTML = `
         <div class="card-header">
             <div class="profile-pic placeholder-pic" style="padding: 0;">${avatarHtml}</div>
-            <button class="btn-icon notes-btn ${hasNotes ? 'has-notes' : ''}" data-steamid="${steamId}" data-persona="${personaName}" title="${t('account.notes')}" style="position: absolute; top: 0; left: 0; width: 28px; height: 28px; opacity: ${hasNotes ? '1' : '0'}; transition: opacity 0.2s;">
+            <button class="btn-icon notes-btn ${hasNotes ? 'has-notes' : ''}" data-steamid="${safeSteamId}" data-persona="${safePersona}" title="${t('account.notes')}" style="position: absolute; top: 0; left: 0; width: 28px; height: 28px; opacity: ${hasNotes ? '1' : '0'}; transition: opacity 0.2s;">
                 <i class="fa-solid ${hasNotes ? 'fa-note-sticky' : 'fa-pen-to-square'}" style="font-size: 0.75rem;"></i>
             </button>
         </div>
         <div class="card-body">
-            <h3>${personaName}</h3>
-            <p class="steam-id">${user.AccountName}</p>
+            <h3>${safePersona}</h3>
+            <p class="steam-id">${safeAccount}</p>
             <div class="card-stats" style="display: flex; gap: 0.4rem; flex-wrap: wrap; justify-content: center; margin-top: 0.5rem;">
                 <span class="stat-pill"><i class="fa-solid fa-gamepad"></i> ${stats.gameCount} ${t('account.games_owned')}</span>
                 ${walletHtml}
@@ -1475,7 +1608,7 @@ function createAccountCard(steamId, user, { hasActiveSession, isCurrent, pickMod
         </div>
         <div class="card-actions">
             ${actionHtml}
-            <button class="btn-icon dropdown-toggle" data-steamid="${steamId}">
+            <button class="btn-icon dropdown-toggle" data-steamid="${safeSteamId}">
                 <i class="fa-solid fa-ellipsis-vertical"></i>
             </button>
         </div>`;
@@ -1484,6 +1617,7 @@ function createAccountCard(steamId, user, { hasActiveSession, isCurrent, pickMod
 
 async function renderAccountsGrid(users) {
     const grid = document.getElementById('accountsGrid');
+    if (!grid) return;
     const heroEl = document.getElementById('accountsHero');
     const sectionLabel = document.getElementById('accountsSectionLabel');
     const headerDesc = document.querySelector('.header-text p');
@@ -1558,6 +1692,7 @@ async function renderAccountsGrid(users) {
     const pickMode = !hasActiveSession;
     sortedIds.forEach(steamId => {
         const user = users[steamId];
+        if (!user) return;
         const isCurrent = hasActiveSession && user.AccountName === session.accountName;
         grid.appendChild(createAccountCard(steamId, user, { hasActiveSession, isCurrent, pickMode }));
     });
@@ -1621,7 +1756,8 @@ async function renderAccountsGrid(users) {
             popup.querySelector('.delete-acc-btn').addEventListener('click', async () => {
                 if (confirm(t('account.delete_confirm'))) {
                     popup.remove();
-                    await deleteSteamAccount(steamId);
+                    const removed = await deleteSteamAccount(steamId);
+                    if (!removed) showToast(t('account.delete_failed'), 'error');
                     loadSteamAccounts();
                 }
             });
@@ -1655,69 +1791,92 @@ async function renderAccountsGrid(users) {
     };
     document.addEventListener('click', _dropdownCloseHandler);
 
-    const attachAccountAction = (btn, isLogin) => {
+    const attachAccountAction = (btn) => {
         btn.addEventListener('click', async function() {
+            if (isSwitchingAccount) return;
             const accountName = this.getAttribute('data-account');
             this.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> ${t('account.switching')}`;
             this.style.pointerEvents = 'none';
 
             isSwitchingAccount = true;
-            snapshotSteamAccountsBeforeSwitch();
-            loginUsers = { ...steamAccountsCatalog };
-            await renderAccountsGrid(loginUsers);
-            await switchSteamAccount(accountName);
-            reloadAccountsAfterSwitch();
+            try {
+                snapshotSteamAccountsBeforeSwitch();
+                loginUsers = { ...steamAccountsCatalog };
+                await renderAccountsGrid(loginUsers);
+                const ok = await switchSteamAccount(accountName);
+                if (ok) {
+                    reloadAccountsAfterSwitch();
+                } else {
+                    isSwitchingAccount = false;
+                    await loadSteamAccounts();
+                }
+            } catch (e) {
+                console.error(e);
+                isSwitchingAccount = false;
+                showToast(t('toast.account_switch_failed'), 'error');
+                await loadSteamAccounts();
+            }
         });
     };
 
-    document.querySelectorAll('.switch-acc-btn').forEach(btn => attachAccountAction(btn, false));
-    document.querySelectorAll('.login-acc-btn').forEach(btn => attachAccountAction(btn, true));
+    document.querySelectorAll('.switch-acc-btn').forEach(btn => attachAccountAction(btn));
+    document.querySelectorAll('.login-acc-btn').forEach(btn => attachAccountAction(btn));
 }
 
 async function deleteSteamAccount(steamId) {
-    return new Promise((resolve) => {
-        delete steamAccountsCatalog[steamId];
-        saveSteamAccountsCatalog();
+    const previous = steamAccountsCatalog[steamId];
+    delete steamAccountsCatalog[steamId];
+    saveSteamAccountsCatalog();
 
-        const vdfPath = path.join(steamPath, 'config', 'loginusers.vdf');
-        try {
-            if (fs.existsSync(vdfPath)) {
-                const backupPath = vdfPath + '.nexus.bak';
-                fs.copyFileSync(vdfPath, backupPath);
-                const parsedMain = vdf.parse(fs.readFileSync(vdfPath, 'utf-8'));
-                const users = parsedMain.users || parsedMain.Users;
-                if (users && users[steamId]) {
-                    delete users[steamId];
-                    parsedMain.users = users;
-                    const newContent = vdf.stringify(parsedMain);
-                    if (Object.keys(parseLoginUsersFromVdf(newContent)).length >= Object.keys(users).length) {
-                        fs.writeFileSync(vdfPath, newContent, 'utf-8');
-                    } else {
-                        fs.copyFileSync(backupPath, vdfPath);
-                    }
-                }
-            }
-        } catch (err) {
-            console.error("Failed to delete from loginusers.vdf", err);
+    const vdfPath = steamPath ? path.join(steamPath, 'config', 'loginusers.vdf') : '';
+    if (!vdfPath || !fs.existsSync(vdfPath)) return true;
+
+    const backupPath = vdfPath + '.nexus.bak';
+    try {
+        const original = readTextFile(vdfPath);
+        const stillThere = !!parseLoginUsersFromVdf(original)[steamId];
+        fs.writeFileSync(backupPath, original, 'utf-8');
+        const beforeCount = Object.keys(parseLoginUsersFromVdf(original)).length;
+        const next = removeVdfUserBlock(original, steamId);
+        const after = next ? parseLoginUsersFromVdf(next) : null;
+        const afterCount = after ? Object.keys(after).length : -1;
+        if (next && afterCount === beforeCount - 1 && !after[steamId]) {
+            fs.writeFileSync(vdfPath, next, 'utf-8');
+            return true;
         }
-        resolve(true);
-    });
+        if (fs.existsSync(backupPath)) fs.copyFileSync(backupPath, vdfPath);
+        if (stillThere && previous) {
+            steamAccountsCatalog[steamId] = previous;
+            saveSteamAccountsCatalog();
+            return false;
+        }
+    } catch (err) {
+        console.error("Failed to delete from loginusers.vdf", err);
+        if (previous) {
+            steamAccountsCatalog[steamId] = previous;
+            saveSteamAccountsCatalog();
+        }
+        return false;
+    }
+    return true;
 }
 
 async function switchSteamAccount(accountName, appIdToLaunch = null) {
-    if (typeof showToast === 'function') {
-        showToast(`${t('toast.account_switched')}: ${accountName}`, 'success', { duration: 3000 });
+    const name = textValue(accountName).replace(/["\r\n&%]/g, '');
+    const exePath = steamPath ? path.join(steamPath, 'steam.exe') : '';
+    if (!name || !exePath || !fs.existsSync(exePath)) {
+        showToast(t('toast.account_switch_failed'), 'error');
+        return false;
     }
+    const appId = /^\d+$/.test(textValue(appIdToLaunch)) ? textValue(appIdToLaunch) : '';
     return new Promise((resolve) => {
-        exec('taskkill /F /IM steam.exe /IM steamwebhelper.exe /T', (error) => {
+        exec('taskkill /F /IM steam.exe /IM steamwebhelper.exe /T', () => {
             setTimeout(() => {
                 // Only registry + launch — do NOT rewrite loginusers.vdf (Steam may drop accounts)
                 for (const steamId of Object.keys(steamAccountsCatalog)) {
-                    if (steamAccountsCatalog[steamId].AccountName === accountName) {
-                        steamAccountsCatalog[steamId].MostRecent = '1';
-                    } else {
-                        steamAccountsCatalog[steamId].MostRecent = '0';
-                    }
+                    const entry = steamAccountsCatalog[steamId];
+                    if (!entry) continue;
+                    entry.MostRecent = textValue(entry.AccountName).toLowerCase() === name.toLowerCase() ? '1' : '0';
                 }
                 saveSteamAccountsCatalog();
                 loginUsers = { ...steamAccountsCatalog };
@@ -1725,17 +1884,26 @@ async function switchSteamAccount(accountName, appIdToLaunch = null) {
                     renderAccountsGrid(loginUsers).catch(() => {});
                 }
 
-                // Delete StartupModeTmp and Set Registry Keys
                 exec(`reg delete "HKCU\\Software\\Valve\\Steam" /v StartupModeTmp /f`, () => {
                     exec(`reg delete "HKCU\\Software\\Valve\\Steam" /v StartupModeTmpIsValid /f`, () => {
-                        exec(`reg add "HKCU\\Software\\Valve\\Steam" /v AutoLoginUser /t REG_SZ /d "${accountName}" /f`, () => {
+                        exec(`reg add "HKCU\\Software\\Valve\\Steam" /v AutoLoginUser /t REG_SZ /d "${name}" /f`, (regErr) => {
+                            if (regErr) {
+                                showToast(t('toast.account_switch_failed'), 'error');
+                                resolve(false);
+                                return;
+                            }
                             exec(`reg add "HKCU\\Software\\Valve\\Steam" /v RememberPassword /t REG_DWORD /d 1 /f`, () => {
                                 exec(`reg add "HKCU\\Software\\Valve\\Steam" /v StartupMode /t REG_DWORD /d 0 /f`, () => {
-                                    let launchCmd = `start "" "${path.join(steamPath, 'steam.exe')}"`;
-                                    if (appIdToLaunch) {
-                                        launchCmd = `start "" "${path.join(steamPath, 'steam.exe')}" -applaunch ${appIdToLaunch}`;
-                                    }
-                                    exec(launchCmd, () => {
+                                    const launchCmd = appId
+                                        ? `start "" "${exePath}" -applaunch ${appId}`
+                                        : `start "" "${exePath}"`;
+                                    exec(launchCmd, (launchErr) => {
+                                        if (launchErr) {
+                                            showToast(t('toast.account_switch_failed'), 'error');
+                                            resolve(false);
+                                            return;
+                                        }
+                                        showToast(`${t('toast.account_switched')}: ${name}`, 'success', { duration: 3000 });
                                         resolve(true);
                                     });
                                 });
@@ -1743,7 +1911,7 @@ async function switchSteamAccount(accountName, appIdToLaunch = null) {
                         });
                     });
                 });
-            }, 1500); 
+            }, 1500);
         });
     });
 }
@@ -1758,46 +1926,37 @@ async function loadInstalledGames() {
     
     let allGames = [];
     
-    // Steam Games
-    if (steamPath) {
-        try {
-            const libraryFoldersPath = path.join(steamPath, 'steamapps', 'libraryfolders.vdf');
-            if (fs.existsSync(libraryFoldersPath)) {
-                const libVdf = vdf.parse(fs.readFileSync(libraryFoldersPath, 'utf-8'));
-                if (libVdf.libraryfolders) {
-                    for (const key in libVdf.libraryfolders) {
-                        const lib = libVdf.libraryfolders[key];
-                        const appsDir = path.join(lib.path, 'steamapps');
-                        if (fs.existsSync(appsDir)) {
-                            const files = fs.readdirSync(appsDir);
-                            files.forEach(file => {
-                                if (file.startsWith('appmanifest_') && file.endsWith('.acf')) {
-                                    try {
-                                        const acfContent = fs.readFileSync(path.join(appsDir, file), 'utf-8');
-                                        const nameMatch = acfContent.match(/"name"\s+"([^"]+)"/i);
-                                        const idMatch = acfContent.match(/"appid"\s+"([^"]+)"/i);
-                                        const ownerMatch = acfContent.match(/"LastOwner"\s+"([^"]+)"/i);
-                                        const ownerId = ownerMatch ? ownerMatch[1] : null;
-                                        
-                                        if (nameMatch && idMatch && nameMatch[1] !== 'Steamworks Common Redistributables') {
-                                            allGames.push({
-                                                name: nameMatch[1],
-                                                id: idMatch[1],
-                                                platform: 'steam',
-                                                icon: '<i class="fa-brands fa-steam"></i>',
-                                                color: '#1e293b, #000',
-                                                ownerId: ownerId
-                                            });
-                                        }
-                                    } catch(e) {}
-                                }
-                            });
-                        }
-                    }
-                }
+    // Steam Games (default library and extra library folders)
+    try {
+        const seenSteamIds = new Set();
+        for (const root of steamLibraryRoots()) {
+            const appsDir = path.join(root, 'steamapps');
+            if (!fs.existsSync(appsDir)) continue;
+            let files = [];
+            try { files = fs.readdirSync(appsDir); } catch (e) { continue; }
+            for (const file of files) {
+                if (!file.startsWith('appmanifest_') || !file.endsWith('.acf')) continue;
+                try {
+                    const acfContent = readTextFile(path.join(appsDir, file));
+                    const nameMatch = acfContent.match(/"name"\s+"([^"]+)"/i);
+                    const idMatch = acfContent.match(/"appid"\s+"([^"]+)"/i);
+                    const ownerMatch = acfContent.match(/"LastOwner"\s+"([^"]+)"/i);
+                    const ownerId = ownerMatch ? ownerMatch[1] : null;
+                    if (!nameMatch || !idMatch || nameMatch[1] === 'Steamworks Common Redistributables') continue;
+                    if (seenSteamIds.has(idMatch[1])) continue;
+                    seenSteamIds.add(idMatch[1]);
+                    allGames.push({
+                        name: nameMatch[1],
+                        id: idMatch[1],
+                        platform: 'steam',
+                        icon: '<i class="fa-brands fa-steam"></i>',
+                        color: '#1e293b, #000',
+                        ownerId: ownerId
+                    });
+                } catch (e) {}
             }
-        } catch(e) { console.error(e); }
-    }
+        }
+    } catch (e) { console.error(e); }
     
     // Epic Games
     try {
@@ -1829,6 +1988,7 @@ async function loadInstalledGames() {
         if (fs.existsSync(xboxDir)) {
             const folders = fs.readdirSync(xboxDir);
             folders.forEach(folder => {
+                try {
                 const lower = folder.toLowerCase();
                 if (lower.includes('dlc') || lower.includes('stub') || lower.includes('gamesave') || lower.includes('pack') || lower.includes('tracker')) return;
                 
@@ -1848,6 +2008,7 @@ async function loadInstalledGames() {
                         });
                     }
                 }
+                } catch (e) {}
             });
         }
     } catch(e) { console.error("Error reading Xbox games", e); }
@@ -1887,6 +2048,7 @@ async function loadInstalledGames() {
         if (fs.existsSync(eaDir)) {
             const folders = fs.readdirSync(eaDir);
             for (let folder of folders) {
+                try {
                 const gamePath = path.join(eaDir, folder);
                 if (fs.statSync(gamePath).isDirectory()) {
                     // Find largest .exe in the root of game folder
@@ -1902,11 +2064,12 @@ async function loadInstalledGames() {
                         });
                     }
                 }
+                } catch (e) {}
             }
         }
     } catch(e) { console.error("Error reading EA games", e); }
 
-    allGames.sort((a, b) => a.name.localeCompare(b.name));
+    allGames.sort((a, b) => textValue(a.name).localeCompare(textValue(b.name)));
 
     grid.innerHTML = '';
     if (allGames.length === 0) {
@@ -1915,13 +2078,17 @@ async function loadInstalledGames() {
     }
     
     allGames.forEach(game => {
+        const safeGameName = escapeHtml(game.name);
+        const safeGameId = escapeHtml(game.id || game.name);
+        const safeExe = escapeHtml(game.exe || '');
+        const safeOwner = escapeHtml(game.ownerId || '');
         const card = document.createElement('div');
         card.className = 'account-card';
         
         let bannerHtml = `
             <div class="profile-pic placeholder-pic" style="position: relative; width: 100%; height: 120px; border-radius: 12px; margin-bottom: 1rem; background: rgba(0,0,0,0.3); border: none;">
                 ${game.icon}
-                <button class="btn-icon change-cover-btn" data-game="${game.id || game.name}" style="position: absolute; top: 8px; right: 8px; width: 32px; height: 32px; background: rgba(0,0,0,0.6); border: none; z-index: 10; opacity: 0; transition: opacity 0.2s;" title="${t('game.change_cover')}">
+                <button class="btn-icon change-cover-btn" data-game="${safeGameId}" style="position: absolute; top: 8px; right: 8px; width: 32px; height: 32px; background: rgba(0,0,0,0.6); border: none; z-index: 10; opacity: 0; transition: opacity 0.2s;" title="${t('game.change_cover')}">
                     <i class="fa-solid fa-image" style="font-size: 1rem;"></i>
                 </button>
             </div>
@@ -1929,21 +2096,23 @@ async function loadInstalledGames() {
         
         let coverUrl = null;
         if (customCovers[game.id || game.name]) {
-            coverUrl = `file://${customCovers[game.id || game.name].replace(/\\/g, '/')}`;
-        } else if (game.platform === 'steam') {
+            const rawCover = textValue(customCovers[game.id || game.name]).replace(/\\/g, '/');
+            if (rawCover && !/["'<>]/.test(rawCover)) coverUrl = `file:///${rawCover.replace(/^\/+/, '')}`;
+        } else if (game.platform === 'steam' && /^\d+$/.test(textValue(game.id))) {
             coverUrl = `https://cdn.akamai.steamstatic.com/steam/apps/${game.id}/header.jpg`;
         }
+        const safeCover = escapeHtml(coverUrl || '');
 
         if (coverUrl) {
             bannerHtml = `
                 <div style="position: relative; width: 100%; height: 120px; margin-bottom: 1rem;">
-                    <img src="${coverUrl}" 
+                    <img src="${safeCover}" 
                          style="width: 100%; height: 100%; object-fit: cover; border-radius: 12px; border: 1px solid var(--border);"
                          onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
                     <div class="profile-pic placeholder-pic fallback-banner" style="display: none; width: 100%; height: 100%; border-radius: 12px; background: rgba(0,0,0,0.3); border: none; position: absolute; top: 0; left: 0; justify-content: center; align-items: center;">
                         ${game.icon}
                     </div>
-                    <button class="btn-icon change-cover-btn" data-game="${game.id || game.name}" style="position: absolute; top: 8px; right: 8px; width: 32px; height: 32px; background: rgba(0,0,0,0.6); border: none; z-index: 10; opacity: 0; transition: opacity 0.2s;" title="${t('game.change_cover')}">
+                    <button class="btn-icon change-cover-btn" data-game="${safeGameId}" style="position: absolute; top: 8px; right: 8px; width: 32px; height: 32px; background: rgba(0,0,0,0.6); border: none; z-index: 10; opacity: 0; transition: opacity 0.2s;" title="${t('game.change_cover')}">
                         <i class="fa-solid fa-image" style="font-size: 1rem;"></i>
                     </button>
                 </div>
@@ -1956,17 +2125,17 @@ async function loadInstalledGames() {
         if (game.platform === 'steam') {
             const linkedAccount = resolveGameAccount(game.id, game.ownerId);
             if (linkedAccount) {
-                accountBadgeHtml = `<span class="game-account-badge" style="font-size: 0.75rem; background: rgba(96,205,255,0.15); color: var(--primary); padding: 0.2rem 0.5rem; border-radius: 6px; display: inline-flex; align-items: center; gap: 0.3rem;"><i class="fa-solid fa-user"></i> ${linkedAccount}</span>`;
+                accountBadgeHtml = `<span class="game-account-badge" style="font-size: 0.75rem; background: rgba(96,205,255,0.15); color: var(--primary); padding: 0.2rem 0.5rem; border-radius: 6px; display: inline-flex; align-items: center; gap: 0.3rem;"><i class="fa-solid fa-user"></i> ${escapeHtml(linkedAccount)}</span>`;
             } else {
                 accountBadgeHtml = `<span class="game-account-badge" style="font-size: 0.75rem; background: rgba(239,68,68,0.1); color: var(--danger); padding: 0.2rem 0.5rem; border-radius: 6px; display: inline-flex; align-items: center; gap: 0.3rem;"><i class="fa-solid fa-circle-question"></i> ${t('game.unknown_owner')}</span>`;
             }
-            assignBtnHtml = `<button class="btn-icon assign-account-btn" data-game-id="${game.id}" data-game-name="${game.name}" title="${t('game.assign_account')}" style="position: absolute; top: 8px; left: 8px; width: 30px; height: 30px; background: rgba(0,0,0,0.7); border: none; z-index: 10; opacity: 0; transition: opacity 0.2s; font-size: 0.85rem;"><i class="fa-solid fa-user-pen"></i></button>`;
+            assignBtnHtml = `<button class="btn-icon assign-account-btn" data-game-id="${safeGameId}" data-game-name="${safeGameName}" title="${t('game.assign_account')}" style="position: absolute; top: 8px; left: 8px; width: 30px; height: 30px; background: rgba(0,0,0,0.7); border: none; z-index: 10; opacity: 0; transition: opacity 0.2s; font-size: 0.85rem;"><i class="fa-solid fa-user-pen"></i></button>`;
         }
         
         // Playtime badge
         let playtimeHtml = '';
         const pt = playtimeData[game.id];
-        if (pt && pt.totalSeconds > 0) {
+        if (pt && typeof pt === 'object' && pt.totalSeconds > 0) {
             const formatted = formatPlaytime(pt.totalSeconds);
             const lastP = formatLastPlayed(pt.lastPlayed);
             playtimeHtml = `<span class="game-playtime-badge" title="${t('game.last_played')}: ${lastP || ''}" style="font-size: 0.7rem; color: var(--text-muted); display: inline-flex; align-items: center; gap: 0.25rem; margin-top: 0.25rem;"><i class="fa-solid fa-clock"></i> ${formatted}</span>`;
@@ -1977,15 +2146,15 @@ async function loadInstalledGames() {
             ${bannerHtml}
             ${assignBtnHtml}
             <div class="card-body">
-                <h3 style="font-size: 1.1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${game.name}">${game.name}</h3>
+                <h3 style="font-size: 1.1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${safeGameName}">${safeGameName}</h3>
                 <p class="steam-id" style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">${getPlatformName(game.platform)} ${accountBadgeHtml}</p>
                 ${playtimeHtml}
             </div>
             <div class="card-actions" style="display: flex; gap: 0.4rem;">
-                <button class="btn btn-switch launch-game-btn" data-platform="${game.platform}" data-id="${game.id}" data-exe="${game.exe || ''}" data-owner="${game.ownerId || ''}" style="flex: 1;">
+                <button class="btn btn-switch launch-game-btn" data-platform="${game.platform}" data-id="${safeGameId}" data-exe="${safeExe}" data-owner="${safeOwner}" style="flex: 1;">
                     <i class="fa-solid fa-play"></i> ${t('game.launch')}
                 </button>
-                <button class="btn-icon game-info-btn" data-game-id="${game.id}" data-game-name="${game.name}" data-platform="${game.platform}" title="${t('gameinfo.title')}" style="width: 36px; height: 36px;">
+                <button class="btn-icon game-info-btn" data-game-id="${safeGameId}" data-game-name="${safeGameName}" data-platform="${game.platform}" title="${t('gameinfo.title')}" style="width: 36px; height: 36px;">
                     <i class="fa-solid fa-circle-info"></i>
                 </button>
             </div>
@@ -2050,16 +2219,18 @@ async function loadInstalledGames() {
             const popup = document.createElement('div');
             popup.className = 'assign-popup';
             
-            let popupHtml = `<p style="font-size: 0.8rem; color: var(--text-muted); padding: 0.5rem 0.8rem; border-bottom: 1px solid var(--border); margin-bottom: 0.3rem; white-space: nowrap;">${t('game.assign_for')} <strong style="color: var(--text-main);">${gameName}</strong></p>`;
+            let popupHtml = `<p style="font-size: 0.8rem; color: var(--text-muted); padding: 0.5rem 0.8rem; border-bottom: 1px solid var(--border); margin-bottom: 0.3rem; white-space: nowrap;">${t('game.assign_for')} <strong style="color: var(--text-main);">${escapeHtml(gameName)}</strong></p>`;
             
             accounts.forEach(acc => {
                 const isLinked = gameAccounts[gameId] === acc.name;
+                const safeAcc = escapeHtml(acc.name);
+                const safePersona = escapeHtml(acc.persona);
                 popupHtml += `
-                    <button class="assign-acc-option" data-game-id="${gameId}" data-account="${acc.name}" style="width: 100%; display: flex; flex-direction: row-reverse; align-items: center; gap: 0.6rem; padding: 0.6rem 0.8rem; background: ${isLinked ? 'rgba(59,130,246,0.15)' : 'transparent'}; border: none; border-radius: 8px; color: ${isLinked ? 'var(--primary)' : 'var(--text-main)'}; cursor: pointer; font-size: 0.85rem; font-family: inherit; transition: background 0.2s; justify-content: flex-end;">
+                    <button class="assign-acc-option" data-game-id="${escapeHtml(gameId)}" data-account="${safeAcc}" style="width: 100%; display: flex; flex-direction: row-reverse; align-items: center; gap: 0.6rem; padding: 0.6rem 0.8rem; background: ${isLinked ? 'rgba(59,130,246,0.15)' : 'transparent'}; border: none; border-radius: 8px; color: ${isLinked ? 'var(--primary)' : 'var(--text-main)'}; cursor: pointer; font-size: 0.85rem; font-family: inherit; transition: background 0.2s; justify-content: flex-end;">
                         <i class="fa-solid ${isLinked ? 'fa-circle-check' : 'fa-user'}" style="color: ${isLinked ? 'var(--primary)' : 'var(--text-muted)'};"></i>
                         <div style="display: flex; flex-direction: column; align-items: flex-end;">
-                            <span>${acc.persona}</span>
-                            <span style="color: var(--text-muted); font-size: 0.7rem; direction: ltr;">${acc.name}</span>
+                            <span>${safePersona}</span>
+                            <span style="color: var(--text-muted); font-size: 0.7rem; direction: ltr;">${safeAcc}</span>
                         </div>
                     </button>
                 `;
@@ -2152,7 +2323,7 @@ async function loadInstalledGames() {
                         // Check actual current account via registry (not MostRecent flag)
                         const currentAccount = await getCurrentSteamAccount();
                         
-                        if (currentAccount && currentAccount.toLowerCase() !== targetAccountName.toLowerCase()) {
+                        if (currentAccount && textValue(currentAccount).toLowerCase() !== textValue(targetAccountName).toLowerCase()) {
                             this.innerHTML = `<i class="fa-solid fa-bolt fa-spin"></i> ${t('game.switching_account')}`;
                             await switchSteamAccount(targetAccountName, id);
                             startGameSession(id, gameName, exe);
@@ -2165,15 +2336,22 @@ async function loadInstalledGames() {
                     }
                 } catch(err) { console.error("Auto switch failed", err); }
                 
-                exec(`start steam://rungameid/${id}`);
-                startGameSession(id, gameName, exe);
+                const appId = textValue(id).replace(/[^\d]/g, '');
+                if (appId) {
+                    exec(`start steam://rungameid/${appId}`);
+                    startGameSession(appId, gameName, exe);
+                }
             } else if (platform === 'epic') {
-                exec(`start com.epicgames.launcher://apps/${id}?action=launch&silent=true`);
-                startGameSession(id, gameName, exe);
+                const epicId = textValue(id);
+                if (epicId && !/["&]/.test(epicId)) {
+                    exec(`start "" "com.epicgames.launcher://apps/${encodeURIComponent(epicId)}?action=launch&silent=true"`);
+                    startGameSession(epicId, gameName, exe);
+                }
             } else {
-                if (exe) {
-                    exec(`start "" "${exe}"`);
-                    startGameSession(id, gameName, exe);
+                const exePath = textValue(exe);
+                if (exePath && !exePath.includes('"') && fs.existsSync(exePath)) {
+                    exec(`start "" "${exePath}"`);
+                    startGameSession(id, gameName, exePath);
                 }
             }
             
@@ -2233,10 +2411,10 @@ function openNotesModal(steamId, personaName) {
         <div class="modal" style="max-width: 480px;">
             <h2 style="display: flex; align-items: center; gap: 0.5rem;">
                 <i class="fa-solid fa-note-sticky" style="color: var(--primary);"></i>
-                ${t('account.notes')} - ${personaName}
+                ${t('account.notes')} - ${escapeHtml(personaName)}
             </h2>
             <div class="form-group">
-                <textarea id="notesTextarea" placeholder="${t('account.notes_placeholder')}" style="width: 100%; min-height: 140px; padding: 0.75rem; background: var(--bg-elevated); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); color: var(--text-main); font-family: inherit; font-size: 0.9rem; resize: vertical; line-height: 1.5;">${currentNote}</textarea>
+                <textarea id="notesTextarea" placeholder="${escapeHtml(t('account.notes_placeholder'))}" style="width: 100%; min-height: 140px; padding: 0.75rem; background: var(--bg-elevated); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); color: var(--text-main); font-family: inherit; font-size: 0.9rem; resize: vertical; line-height: 1.5;">${escapeHtml(currentNote)}</textarea>
             </div>
             <div class="modal-actions">
                 <button class="btn" id="notesCancel">${t('modal.close')}</button>
@@ -2273,8 +2451,16 @@ function openNotesModal(steamId, personaName) {
 let performanceMonitorInterval = null;
 
 async function updatePerformanceUI() {
-    const stats = await ipcRenderer.invoke('get-system-stats');
-    const gpu = await ipcRenderer.invoke('get-gpu-stats');
+    let stats;
+    let gpu;
+    try {
+        stats = await ipcRenderer.invoke('get-system-stats');
+        gpu = await ipcRenderer.invoke('get-gpu-stats');
+    } catch (e) {
+        console.error('updatePerformanceUI', e);
+        return;
+    }
+    if (!stats || !stats.cpu || !stats.ram) return;
     
     const cpuBar = document.getElementById('perfCpuBar');
     const cpuText = document.getElementById('perfCpuText');
@@ -2301,7 +2487,7 @@ async function updatePerformanceUI() {
     const vramText = document.getElementById('vramUsageText');
     const vramBar = document.getElementById('vramBar');
 
-    if (gpu.available && gpuBar) {
+    if (gpu && gpu.available && gpuBar && gpuText) {
         gpuBar.style.width = gpu.usage + '%';
         gpuText.innerText = gpu.usage + '%';
         gpuBar.style.background = gpu.usage > 80 ? 'var(--danger)' : gpu.usage > 60 ? 'var(--warning)' : 'var(--primary)';
@@ -2369,8 +2555,9 @@ async function fetchFreeGames(force = false) {
     try {
         const https = require('https');
         const data = await new Promise((resolve, reject) => {
-            https.get('https://www.gamerpower.com/api/giveaways?platform=pc', (res) => {
+            const req = https.get('https://www.gamerpower.com/api/giveaways?platform=pc', (res) => {
                 if (res.statusCode !== 200) {
+                    res.resume();
                     reject(new Error(`API Error: ${res.statusCode}`));
                     return;
                 }
@@ -2380,16 +2567,22 @@ async function fetchFreeGames(force = false) {
                     try { resolve(JSON.parse(rawData)); }
                     catch(e) { reject(e); }
                 });
-            }).on('error', reject);
+            });
+            req.setTimeout(8000, () => {
+                req.destroy();
+                reject(new Error('timeout'));
+            });
+            req.on('error', reject);
         });
         
         // Filter locally to get only Games from Steam, Epic, GOG
-        const filteredGames = data.filter(game => 
-            game.type === 'Game' && 
-            (game.platforms.toLowerCase().includes('steam') || 
-             game.platforms.toLowerCase().includes('epic') || 
-             game.platforms.toLowerCase().includes('gog'))
-        );
+        const list = Array.isArray(data) ? data : [];
+        const filteredGames = list.filter(game => {
+            const platforms = textValue(game && game.platforms).toLowerCase();
+            return game && game.type === 'Game' && (
+                platforms.includes('steam') || platforms.includes('epic') || platforms.includes('gog')
+            );
+        });
         
         cachedFreeGames = filteredGames.slice(0, 10); // get top 10
         lastFreeGamesCheck = now;
@@ -2413,25 +2606,29 @@ function renderFreeGames(games) {
 
     games.forEach(game => {
         let platIcon = 'fa-windows';
-        const p = game.platforms.toLowerCase();
+        const p = textValue(game.platforms).toLowerCase();
         if (p.includes('steam')) platIcon = 'fa-steam';
         else if (p.includes('epic')) platIcon = 'fa-e';
         else if (p.includes('gog')) platIcon = 'fa-g';
         
+        const title = escapeHtml(game.title);
+        const platformLabel = escapeHtml(textValue(game.platforms).split(',')[0]);
+        const thumb = /^https:\/\//i.test(textValue(game.thumbnail)) ? escapeHtml(game.thumbnail) : '';
         const card = document.createElement('div');
         card.className = 'free-game-card';
         card.innerHTML = `
-            <img src="${game.thumbnail}" alt="${game.title}" onerror="this.src='https://via.placeholder.com/180x100/1e1e1e/888888?text=No+Image'">
+            <img src="${thumb}" alt="${title}" onerror="this.src='https://via.placeholder.com/180x100/1e1e1e/888888?text=No+Image'">
             <div class="info">
-                <div class="title" title="${game.title}">${game.title}</div>
+                <div class="title" title="${title}">${title}</div>
                 <div class="platform">
-                    <span><i class="fa-brands ${platIcon}"></i> ${game.platforms.split(',')[0]}</span>
+                    <span><i class="fa-brands ${platIcon}"></i> ${platformLabel}</span>
                     <span class="badge">FREE</span>
                 </div>
             </div>
         `;
         card.addEventListener('click', () => {
-            ipcRenderer.invoke('open-external', game.open_giveaway);
+            const url = textValue(game.open_giveaway);
+            if (/^https:\/\//i.test(url)) ipcRenderer.invoke('open-external', url);
         });
         
         listEl.appendChild(card);
@@ -2460,6 +2657,8 @@ async function exportFullBackup() {
                 accountNotes,
                 playtimeData,
                 customCovers,
+                steamAccounts: steamAccountsCatalog,
+                platformAccounts: platformAccountsCatalog,
                 settings: {
                     lang: currentLang,
                     encryption: localStorage.getItem('nexus_encryption') === 'true',
@@ -2495,23 +2694,33 @@ async function importFullBackup() {
         if (!backup.data) throw new Error('Invalid backup format');
         
         const d = backup.data;
-        if (d.gameAccounts) { gameAccounts = d.gameAccounts; saveGameAccounts(); }
-        if (d.accountNotes) { accountNotes = d.accountNotes; saveAccountNotes(); }
-        if (d.playtimeData) { playtimeData = d.playtimeData; savePlaytime(); }
-        if (d.customCovers) {
+        if (isPlainObject(d.gameAccounts)) { gameAccounts = d.gameAccounts; saveGameAccounts(); }
+        if (isPlainObject(d.accountNotes)) { accountNotes = d.accountNotes; saveAccountNotes(); }
+        if (isPlainObject(d.playtimeData)) { playtimeData = d.playtimeData; savePlaytime(); }
+        if (isPlainObject(d.customCovers)) {
             customCovers = d.customCovers;
             saveCustomCovers();
         }
-        if (d.settings) {
-            if (d.settings.lang) localStorage.setItem('nexus_lang', d.settings.lang);
+        if (isPlainObject(d.steamAccounts)) {
+            steamAccountsCatalog = normalizeSteamUsers(d.steamAccounts);
+            saveSteamAccountsCatalog();
+        }
+        if (isPlainObject(d.platformAccounts)) {
+            platformAccountsCatalog = d.platformAccounts;
+            savePlatformAccountsCatalog();
+        }
+        if (isPlainObject(d.settings)) {
+            if (d.settings.lang === 'ar' || d.settings.lang === 'en') localStorage.setItem('nexus_lang', d.settings.lang);
             if (typeof d.settings.encryption === 'boolean') localStorage.setItem('nexus_encryption', d.settings.encryption);
             if (typeof d.settings.booster === 'boolean') localStorage.setItem('nexus_game_booster', d.settings.booster);
-            if (d.settings.boosterProcesses) {
-                boosterProcesses = d.settings.boosterProcesses;
+            if (Array.isArray(d.settings.boosterProcesses)) {
+                boosterProcesses = d.settings.boosterProcesses.filter(p => p && typeof p.name === 'string');
                 localStorage.setItem('nexus_booster_processes', JSON.stringify(boosterProcesses));
             }
-            if (d.settings.viewMode) localStorage.setItem('nexus_view_mode', d.settings.viewMode);
-            if (d.settings.themeColor) localStorage.setItem('nexus_theme_color', d.settings.themeColor);
+            if (d.settings.viewMode === 'grid' || d.settings.viewMode === 'list') localStorage.setItem('nexus_view_mode', d.settings.viewMode);
+            if (typeof d.settings.themeColor === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(d.settings.themeColor)) {
+                localStorage.setItem('nexus_theme_color', d.settings.themeColor);
+            }
         }
         
         if (status) status.innerHTML = `<span style="color: var(--success);"><i class="fa-solid fa-circle-check"></i> ${t('backup.success')}</span>`;
@@ -2598,6 +2807,8 @@ window.addEventListener('DOMContentLoaded', async () => {
             saveAccountNotes();
             savePlaytime();
             saveCustomCovers();
+            saveSteamAccountsCatalog();
+            savePlatformAccountsCatalog();
             showToast(newState ? t('toast.encryption_enabled') : t('toast.encryption_disabled'), newState ? 'success' : 'info');
         });
     }
@@ -2753,15 +2964,16 @@ function showToast(message, type = 'info', options = {}) {
         warning: 'fa-triangle-exclamation',
         info: 'fa-circle-info'
     };
-    const iconClass = icon || iconMap[type] || iconMap.info;
+    const rawIcon = textValue(icon || iconMap[type] || iconMap.info);
+    const iconClass = /^[\w\-\s]+$/.test(rawIcon) ? rawIcon : 'fa-circle-info';
     
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
     toast.innerHTML = `
         <div class="toast-icon"><i class="fa-solid ${iconClass}"></i></div>
         <div class="toast-content">
-            ${title ? `<div class="toast-title">${title}</div>` : ''}
-            <div class="toast-message">${message}</div>
+            ${title ? `<div class="toast-title">${escapeHtml(title)}</div>` : ''}
+            <div class="toast-message">${escapeHtml(message)}</div>
         </div>
         <button class="toast-close" aria-label="close"><i class="fa-solid fa-xmark"></i></button>
     `;
@@ -2824,9 +3036,14 @@ async function renderServerStatusWidget() {
     
     container.innerHTML = `<div style="text-align: center; padding: 1rem; color: var(--text-muted);"><i class="fa-solid fa-spinner fa-spin"></i> ${t('servers.checking')}</div>`;
     
-    const result = await fetchSteamServerStatus(true);
+    let result;
+    try {
+        result = await fetchSteamServerStatus(true);
+    } catch (e) {
+        result = { success: false };
+    }
     
-    if (!result.success) {
+    if (!result || !result.success || !result.services) {
         container.innerHTML = `<div style="text-align: center; padding: 1rem; color: var(--danger);"><i class="fa-solid fa-circle-exclamation"></i> ${t('servers.no_data')}</div>`;
         return;
     }
@@ -2858,26 +3075,35 @@ async function renderServerStatusWidget() {
 // ===== Extended Game Info Modal =====
 // ===========================================
 function readSteamAcfData(gameId) {
-    if (!steamPath) return null;
+    const appId = textValue(gameId).replace(/[^\d]/g, '');
+    if (!appId) return null;
     try {
-        const acfPath = path.join(steamPath, 'steamapps', `appmanifest_${gameId}.acf`);
-        if (!fs.existsSync(acfPath)) return null;
-        const content = fs.readFileSync(acfPath, 'utf-8');
-        const parsed = vdf.parse(content);
-        const state = parsed.AppState || {};
-        return {
-            name: state.name,
-            installDir: state.installdir ? path.join(steamPath, 'steamapps', 'common', state.installdir) : null,
-            sizeOnDisk: state.SizeOnDisk ? parseInt(state.SizeOnDisk) : 0,
-            lastUpdated: state.LastUpdated ? parseInt(state.LastUpdated) : 0,
-            lastOwner: state.LastOwner,
-            buildId: state.buildid
-        };
-    } catch(e) { console.error('readSteamAcfData', e); return null; }
+        for (const root of steamLibraryRoots()) {
+            const acfPath = path.join(root, 'steamapps', `appmanifest_${appId}.acf`);
+            if (!fs.existsSync(acfPath)) continue;
+            const content = readTextFile(acfPath);
+            const parsed = vdf.parse(content);
+            const state = parsed.AppState || parsed.appstate || {};
+            const installName = textValue(state.installdir || state.InstallDir);
+            const size = parseInt(state.SizeOnDisk || state.sizeondisk, 10);
+            const updated = parseInt(state.LastUpdated || state.lastupdated, 10);
+            return {
+                name: textValue(state.name),
+                installDir: installName ? path.join(root, 'steamapps', 'common', installName) : null,
+                sizeOnDisk: Number.isFinite(size) ? size : 0,
+                lastUpdated: Number.isFinite(updated) ? updated : 0,
+                lastOwner: textValue(state.LastOwner || state.lastowner),
+                buildId: textValue(state.buildid || state.BuildID)
+            };
+        }
+    } catch (e) { console.error('readSteamAcfData', e); }
+    return null;
 }
 
 function formatBytes(bytes) {
-    if (!bytes) return '-';
+    const n = Number(bytes);
+    if (!Number.isFinite(n) || n <= 0) return '-';
+    bytes = n;
     const gb = bytes / (1024 * 1024 * 1024);
     if (gb >= 1) return gb.toFixed(2) + ' GB';
     const mb = bytes / (1024 * 1024);
@@ -2899,14 +3125,16 @@ function openGameInfoModal(gameId, gameName, platform = 'steam', bannerUrl = nul
     if (existing) existing.remove();
     
     const acfData = platform === 'steam' ? readSteamAcfData(gameId) : null;
-    const playtime = playtimeData[gameId];
+    const playtime = playtimeData[gameId] && typeof playtimeData[gameId] === 'object' ? playtimeData[gameId] : null;
     const linkedAccount = platform === 'steam' ? resolveGameAccount(gameId, acfData?.lastOwner) : null;
     
     // Build banner
-    const banner = bannerUrl 
-        ? `<div class="game-info-banner" style="background-image: url('${bannerUrl}');"></div>`
-        : (platform === 'steam'
-            ? `<div class="game-info-banner" style="background-image: url('https://cdn.akamai.steamstatic.com/steam/apps/${gameId}/library_hero.jpg');"></div>`
+    const safeAppId = textValue(gameId).replace(/[^\d]/g, '');
+    const safeBanner = /^https:\/\//i.test(textValue(bannerUrl)) ? escapeHtml(bannerUrl) : '';
+    const banner = safeBanner
+        ? `<div class="game-info-banner" style="background-image: url('${safeBanner}');"></div>`
+        : (platform === 'steam' && safeAppId
+            ? `<div class="game-info-banner" style="background-image: url('https://cdn.akamai.steamstatic.com/steam/apps/${safeAppId}/library_hero.jpg');"></div>`
             : '');
     
     const overlay = document.createElement('div');
@@ -2915,10 +3143,10 @@ function openGameInfoModal(gameId, gameName, platform = 'steam', bannerUrl = nul
     overlay.innerHTML = `
         <div class="modal game-info-modal">
             ${banner}
-            <h2 style="margin-bottom: 0.25rem;">${gameName}</h2>
+            <h2 style="margin-bottom: 0.25rem;">${escapeHtml(gameName)}</h2>
             <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 1rem;">
                 ${getPlatformName(platform)}
-                ${linkedAccount ? `<span style="margin: 0 0.5rem;">•</span> <i class="fa-solid fa-user"></i> ${linkedAccount}` : ''}
+                ${linkedAccount ? `<span style="margin: 0 0.5rem;">•</span> <i class="fa-solid fa-user"></i> ${escapeHtml(linkedAccount)}` : ''}
             </p>
             
             <div class="game-info-stats">
@@ -2950,7 +3178,7 @@ function openGameInfoModal(gameId, gameName, platform = 'steam', bannerUrl = nul
             
             ${acfData?.installDir ? `
                 <div style="background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.6rem 0.8rem; margin-bottom: 1rem; font-size: 0.78rem; color: var(--text-muted); word-break: break-all;">
-                    <i class="fa-solid fa-folder" style="margin-left: 0.4rem;"></i> ${acfData.installDir}
+                    <i class="fa-solid fa-folder" style="margin-left: 0.4rem;"></i> ${escapeHtml(acfData.installDir)}
                 </div>
             ` : ''}
             
@@ -2972,14 +3200,16 @@ function openGameInfoModal(gameId, gameName, platform = 'steam', bannerUrl = nul
     const openFolderBtn = overlay.querySelector('#gameInfoOpenFolder');
     if (openFolderBtn && acfData?.installDir) {
         openFolderBtn.addEventListener('click', () => {
-            exec(`explorer "${acfData.installDir}"`);
+            const dir = textValue(acfData.installDir);
+            if (dir && !dir.includes('"') && fs.existsSync(dir)) exec(`explorer "${dir}"`);
         });
     }
     
     const steamPageBtn = overlay.querySelector('#gameInfoSteamPage');
     if (steamPageBtn) {
         steamPageBtn.addEventListener('click', () => {
-            ipcRenderer.invoke('open-external', `https://store.steampowered.com/app/${gameId}/`);
+            const appId = textValue(gameId).replace(/[^\d]/g, '');
+            if (appId) ipcRenderer.invoke('open-external', `https://store.steampowered.com/app/${appId}/`);
         });
     }
 }
@@ -2991,6 +3221,7 @@ function savePlatformAccountsCatalog() {
 }
 
 function mergePlatformAccountList(platform, diskAccounts) {
+    if (!isPlainObject(platformAccountsCatalog)) platformAccountsCatalog = {};
     const catalog = Array.isArray(platformAccountsCatalog[platform]) ? platformAccountsCatalog[platform] : [];
     const merged = [...new Set([...catalog, ...diskAccounts])].filter(Boolean);
     platformAccountsCatalog[platform] = merged;
@@ -2999,7 +3230,7 @@ function mergePlatformAccountList(platform, diskAccounts) {
 }
 
 function removeFromPlatformCatalog(platform, accName) {
-    if (!platformAccountsCatalog[platform]) return;
+    if (!Array.isArray(platformAccountsCatalog?.[platform])) return;
     platformAccountsCatalog[platform] = platformAccountsCatalog[platform].filter(n => n !== accName);
     savePlatformAccountsCatalog();
 }
@@ -3016,6 +3247,7 @@ function isSafeAccountName(name) {
     if (!name || name === '.' || name === '..') return false;
     if (name.length > 80) return false;
     if (/[<>:"/\\|?*\u0000-\u001F]/.test(name)) return false;
+    if (/[. ]$/.test(name)) return false;
     if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)/i.test(name)) return false;
     return true;
 }
@@ -3026,18 +3258,19 @@ function launchPlatformApp(platform) {
 }
 
 function createPlatformAccountCard(platform, accName, meta, hasActiveSession, isCurrent) {
+    const safeName = escapeHtml(accName);
     const pickMode = !hasActiveSession;
     let actionHtml;
     let loginHint = '';
     if (isCurrent) {
         actionHtml = `<button class="btn btn-switch disabled" disabled><i class="fa-solid fa-circle-check"></i> ${t('account.logged_in')}</button>`;
     } else if (!hasActiveSession) {
-        actionHtml = `<button class="btn btn-login-acc platform-login-btn" data-platform="${platform}" data-account="${accName}">
+        actionHtml = `<button class="btn btn-login-acc platform-login-btn" data-platform="${platform}" data-account="${safeName}">
             <i class="fa-solid fa-right-to-bracket"></i> ${t('account.login')}
         </button>`;
         loginHint = `<p class="card-login-hint">${t('account.login_hint')}</p>`;
     } else {
-        actionHtml = `<button class="btn btn-switch-acc platform-switch-btn" data-platform="${platform}" data-account="${accName}">
+        actionHtml = `<button class="btn btn-switch-acc platform-switch-btn" data-platform="${platform}" data-account="${safeName}">
             <i class="fa-solid fa-arrow-right-arrow-left"></i> ${t('account.switch')}
         </button>`;
     }
@@ -3052,13 +3285,13 @@ function createPlatformAccountCard(platform, accName, meta, hasActiveSession, is
             ${isCurrent ? `<div class="account-status">${t('account.logged_in')}</div>` : ''}
         </div>
         <div class="card-body">
-            <h3>${accName}</h3>
+            <h3>${safeName}</h3>
             <p class="steam-id">${meta.name}</p>
             ${loginHint}
         </div>
         <div class="card-actions">
             ${actionHtml}
-            <button class="btn-icon platform-dropdown-btn" data-platform="${platform}" data-account="${accName}">
+            <button class="btn-icon platform-dropdown-btn" data-platform="${platform}" data-account="${safeName}">
                 <i class="fa-solid fa-ellipsis-vertical"></i>
             </button>
         </div>`;
@@ -3080,7 +3313,7 @@ function renderPlatformHero(heroEl, platform, meta, sessionInfo, activeAccount) 
                 </div>
                 <div class="session-hero-info">
                     <span class="session-badge session-badge--online"><span class="pulse-dot"></span> ${t('account.logged_in')}</span>
-                    <h2>${activeAccount}</h2>
+                    <h2>${escapeHtml(activeAccount)}</h2>
                     <div class="session-hero-meta">
                         <span class="meta-item"><i class="${meta.icon}"></i> ${meta.name}</span>
                         <span class="meta-item">${t('platform.launcher_running')}</span>
@@ -3167,10 +3400,10 @@ function bindPlatformAccountActions(sectionEl) {
             popup.className = 'dropdown-popup';
             popup.style.cssText = `position: fixed; top: ${btnRect.top - 6}px; left: ${btnRect.left}px; transform: translateY(-100%); background: var(--bg-sidebar); border: 1px solid var(--border); border-radius: 10px; padding: 0.5rem; z-index: 999; box-shadow: 0 10px 25px rgba(0,0,0,0.5); min-width: 170px; direction: rtl;`;
             popup.innerHTML = `
-                <button class="btn rename-platform-btn" data-platform="${platform}" data-account="${accName}" style="width: 100%; justify-content: flex-start; background: transparent; color: var(--text-main); border: none; padding: 0.5rem; font-size: 0.9rem; cursor: pointer; border-radius: 6px; display: flex; align-items: center; gap: 0.5rem; font-family: inherit;">
+                <button class="btn rename-platform-btn" data-platform="${platform}" data-account="${escapeHtml(accName)}" style="width: 100%; justify-content: flex-start; background: transparent; color: var(--text-main); border: none; padding: 0.5rem; font-size: 0.9rem; cursor: pointer; border-radius: 6px; display: flex; align-items: center; gap: 0.5rem; font-family: inherit;">
                     <i class="fa-solid fa-pen"></i> ${t('account.rename')}
                 </button>
-                <button class="btn delete-platform-btn" data-platform="${platform}" data-account="${accName}" style="width: 100%; justify-content: flex-start; background: transparent; color: var(--danger); border: none; padding: 0.5rem; font-size: 0.9rem; cursor: pointer; border-radius: 6px; display: flex; align-items: center; gap: 0.5rem; font-family: inherit;">
+                <button class="btn delete-platform-btn" data-platform="${platform}" data-account="${escapeHtml(accName)}" style="width: 100%; justify-content: flex-start; background: transparent; color: var(--danger); border: none; padding: 0.5rem; font-size: 0.9rem; cursor: pointer; border-radius: 6px; display: flex; align-items: center; gap: 0.5rem; font-family: inherit;">
                     <i class="fa-solid fa-trash"></i> ${t('account.delete')}
                 </button>`;
             document.body.appendChild(popup);

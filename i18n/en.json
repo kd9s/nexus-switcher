@@ -40,6 +40,7 @@
     "delete": "Remove Account",
     "copied": "Copied",
     "delete_confirm": "Are you sure you want to remove this account from the catalog and your device?",
+    "delete_failed": "Could not remove the account from Steam's file, so it is still listed",
     "notes": "Notes",
     "notes_placeholder": "Write your notes about this account...",
     "games_owned": "games",
