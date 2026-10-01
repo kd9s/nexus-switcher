@@ -172,6 +172,34 @@
                                 <button class="btn btn-switch launch-platform-btn" data-platform="ea" data-i18n-label="launcher.launch">Launch</button>
                             </div>
                         </div>
+                        <div class="account-card">
+                            <div class="card-header">
+                                <div class="profile-pic placeholder-pic" style="background: #eb0029; color: white;">
+                                    <i class="fa-solid fa-r"></i>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <h3>Riot Games</h3>
+                                <p class="steam-id">Riot Client</p>
+                            </div>
+                            <div class="card-actions">
+                                <button class="btn btn-switch launch-platform-btn" data-platform="riot" data-i18n-label="launcher.launch">Launch</button>
+                            </div>
+                        </div>
+                        <div class="account-card">
+                            <div class="card-header">
+                                <div class="profile-pic placeholder-pic" style="background: #0070ff; color: white;">
+                                    <i class="fa-solid fa-u"></i>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <h3>Ubisoft Connect</h3>
+                                <p class="steam-id">Ubisoft</p>
+                            </div>
+                            <div class="card-actions">
+                                <button class="btn btn-switch launch-platform-btn" data-platform="ubisoft" data-i18n-label="launcher.launch">Launch</button>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -210,7 +238,7 @@
                     <div class="accounts-grid" id="installedGamesGrid">
                         <div class="info-box">
                             <i class="fa-solid fa-spinner fa-spin"></i>
-                            <p>جاري البحث عن الألعاب المثبتة...</p>
+                            <p data-i18n="game.searching">جاري البحث عن الألعاب المثبتة...</p>
                         </div>
                     </div>
                 </div>
@@ -498,6 +526,7 @@
 
             <div id="otherAddInstructions" class="add-modal-panel add-modal-panel--platform" style="display: none;">
                 <p class="add-modal-warn-text" data-i18n="modal.platform_save_steps">سجّل الدخول في اللانشر أولاً، ثم اكتب اسماً للحساب هنا واضغط حفظ الجلسة (قد يستغرق دقيقة).</p>
+                <p class="add-modal-info-text" id="epicNewLoginInstructions" style="display: none;" data-i18n="modal.epic_new_login_hint">لإضافة حساب جديد بدون تسجيل خروج: احفظ حسابك الحالي أولاً، ثم اضغط «تسجيل دخول بحساب آخر» ليفتح Epic على شاشة تسجيل الدخول.</p>
             </div>
 
             <div class="form-group add-account-name-group" id="addAccountNameGroup" style="display: none;">
@@ -516,6 +545,9 @@
                 <button type="button" class="btn" id="cancelAddModalBtn" data-i18n="modal.close">إلغاء</button>
                 <button type="button" class="btn" id="openLauncherFromAddModalBtn" style="display: none;">
                     <i class="fa-solid fa-arrow-up-right-from-square"></i> <span data-i18n="modal.open_launcher">فتح اللانشر</span>
+                </button>
+                <button type="button" class="btn" id="epicNewLoginBtn" style="display: none;">
+                    <i class="fa-solid fa-user-plus"></i> <span data-i18n="modal.epic_new_login">تسجيل دخول بحساب آخر</span>
                 </button>
                 <button type="button" class="btn btn-primary" id="saveSessionBtn" style="display: none;"><i class="fa-solid fa-floppy-disk"></i> <span data-i18n="modal.save_session">حفظ الجلسة</span></button>
                 <button type="button" class="btn btn-primary close-modal" id="okAddModalBtn" data-i18n="modal.ok">حسناً</button>

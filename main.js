@@ -24,7 +24,8 @@ const PLATFORM_ACTIVE_STATE_PATH = path.join(app.getPath('userData'), 'nexus-dat
 function readPlatformActiveState() {
     try {
         if (fs.existsSync(PLATFORM_ACTIVE_STATE_PATH)) {
-            return JSON.parse(fs.readFileSync(PLATFORM_ACTIVE_STATE_PATH, 'utf-8'));
+            const parsed = JSON.parse(fs.readFileSync(PLATFORM_ACTIVE_STATE_PATH, 'utf-8'));
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
         }
     } catch (e) {}
     return {};
@@ -43,9 +44,12 @@ const ROAMING_APPDATA = path.join(os.homedir(), 'AppData', 'Roaming');
 // Epic session paths (aligned with TcNo Account Switcher Platforms.json)
 const EPIC_SAVED_DIR = path.join(LOCAL_APPDATA, 'EpicGamesLauncher', 'Saved');
 const EPIC_CONFIG_DIR = path.join(EPIC_SAVED_DIR, 'Config');
+// The Epic Games Launcher stores its login RememberMe token in Config\Windows\.
+// WindowsEditor\ belongs to the Unreal Engine editor and can hold a DIFFERENT
+// (stale) token, so Windows must be preferred as the authoritative source.
 const EPIC_GAME_USER_SETTINGS = [
-    path.join(EPIC_CONFIG_DIR, 'WindowsEditor', 'GameUserSettings.ini'),
-    path.join(EPIC_CONFIG_DIR, 'Windows', 'GameUserSettings.ini')
+    path.join(EPIC_CONFIG_DIR, 'Windows', 'GameUserSettings.ini'),
+    path.join(EPIC_CONFIG_DIR, 'WindowsEditor', 'GameUserSettings.ini')
 ];
 // Epic Games Launcher's own namespace id (same for everyone, NOT a user account id)
 const EPIC_LAUNCHER_NAMESPACE_ID = '680103d77ecd4944a13f2a06af3b034e';
@@ -117,6 +121,26 @@ function getSessionRoots(info) {
     return [];
 }
 
+function isSafeAccountName(name) {
+    if (!name || name === '.' || name === '..') return false;
+    if (name.length > 80) return false;
+    if (/[<>:"/\\|?*\u0000-\u001F]/.test(name)) return false;
+    if (/[. ]$/.test(name)) return false;
+    if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)/i.test(name)) return false;
+    return true;
+}
+
+function sessionSlotDir(platform, accountName) {
+    if (!PLATFORM_INFO[platform]) throw new Error('Unknown platform.');
+    const name = String(accountName || '').trim();
+    if (!isSafeAccountName(name)) throw new Error('Invalid account name.');
+    const base = path.resolve(SESSIONS_DIR, platform);
+    const target = path.resolve(base, name);
+    const rel = path.relative(base, target);
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('Invalid account name.');
+    return target;
+}
+
 function findEpicLauncherExe() {
     const candidates = [
         path.join('C:', 'Program Files (x86)', 'Epic Games', 'Launcher', 'Portal', 'Binaries', 'Win64', 'EpicGamesLauncher.exe'),
@@ -179,9 +203,30 @@ async function removePathSafe(targetPath) {
     await fsp.rm(targetPath, { recursive: true, force: true });
 }
 
+async function copyTreeManual(src, dest) {
+    const stat = await fsp.stat(src);
+    if (stat.isFile()) {
+        await fsp.mkdir(path.dirname(dest), { recursive: true });
+        await fsp.writeFile(dest, await fsp.readFile(src));
+        return;
+    }
+    await fsp.mkdir(dest, { recursive: true });
+    const entries = await fsp.readdir(src, { withFileTypes: true });
+    for (const entry of entries) {
+        const from = path.join(src, entry.name);
+        const to = path.join(dest, entry.name);
+        if (entry.isDirectory()) await copyTreeManual(from, to);
+        else if (entry.isFile()) await fsp.writeFile(to, await fsp.readFile(from));
+    }
+}
+
 async function copyTreeAsync(src, dest) {
     await fsp.mkdir(path.dirname(dest), { recursive: true });
-    await fsp.cp(src, dest, { recursive: true, force: true });
+    try {
+        await fsp.cp(src, dest, { recursive: true, force: true });
+    } catch (e) {
+        await copyTreeManual(src, dest);
+    }
 }
 
 function execAsync(cmd) {
@@ -273,6 +318,7 @@ async function restoreEpicUnified(sourceDir, platform) {
         fs.existsSync(path.join(sourceDir, 'registry', 'AccountId.json'));
 
     // 1) Restore the Config folder (contains GameUserSettings.ini with tokens)
+    let configRestored = false;
     const configBackup = isTcNo
         ? path.join(sourceDir, 'Config')
         : path.join(sourceDir, 'Saved', 'Config');
@@ -280,25 +326,33 @@ async function restoreEpicUnified(sourceDir, platform) {
         sendSessionProgress(platform, 'restoring-config');
         await removePathSafe(EPIC_CONFIG_DIR);
         await copyTreeAsync(configBackup, EPIC_CONFIG_DIR);
+        configRestored = true;
         restored++;
     }
 
-    // 2) Ensure GameUserSettings.ini is in place (mirror across Windows/WindowsEditor)
-    let iniBackup = null;
-    if (fs.existsSync(path.join(sourceDir, 'GameUserSettings.ini'))) {
-        iniBackup = path.join(sourceDir, 'GameUserSettings.ini');
-    } else if (fs.existsSync(path.join(sourceDir, 'Saved', 'Config', 'WindowsEditor', 'GameUserSettings.ini'))) {
-        iniBackup = path.join(sourceDir, 'Saved', 'Config', 'WindowsEditor', 'GameUserSettings.ini');
-    } else if (fs.existsSync(path.join(sourceDir, 'Saved', 'Config', 'Windows', 'GameUserSettings.ini'))) {
-        iniBackup = path.join(sourceDir, 'Saved', 'Config', 'Windows', 'GameUserSettings.ini');
-    }
-    if (iniBackup) {
-        sendSessionProgress(platform, 'restoring-ini');
-        for (const dest of EPIC_GAME_USER_SETTINGS) {
-            await fsp.mkdir(path.dirname(dest), { recursive: true });
-            await copyTreeAsync(iniBackup, dest);
+    // 2) Legacy fallback ONLY: reconstruct GameUserSettings.ini from a standalone
+    // copy for old backups that have no full Config folder. When the Config folder
+    // was restored above, Windows\ and WindowsEditor\ are already exact copies of
+    // what was saved — those two files legitimately hold DIFFERENT tokens, so
+    // cross-mirroring one over both would overwrite the launcher's real RememberMe
+    // token in Windows\ and break auto-login. Hence we skip the mirror in that case.
+    if (!configRestored) {
+        let iniBackup = null;
+        if (fs.existsSync(path.join(sourceDir, 'GameUserSettings.ini'))) {
+            iniBackup = path.join(sourceDir, 'GameUserSettings.ini');
+        } else if (fs.existsSync(path.join(sourceDir, 'Saved', 'Config', 'Windows', 'GameUserSettings.ini'))) {
+            iniBackup = path.join(sourceDir, 'Saved', 'Config', 'Windows', 'GameUserSettings.ini');
+        } else if (fs.existsSync(path.join(sourceDir, 'Saved', 'Config', 'WindowsEditor', 'GameUserSettings.ini'))) {
+            iniBackup = path.join(sourceDir, 'Saved', 'Config', 'WindowsEditor', 'GameUserSettings.ini');
         }
-        restored++;
+        if (iniBackup) {
+            sendSessionProgress(platform, 'restoring-ini');
+            for (const dest of EPIC_GAME_USER_SETTINGS) {
+                await fsp.mkdir(path.dirname(dest), { recursive: true });
+                await copyTreeAsync(iniBackup, dest);
+            }
+            restored++;
+        }
     }
 
     // 3) Restore registry AccountId (from new backup, else derive from old backup)
@@ -417,7 +471,7 @@ async function resaveCurrentSessionBeforeSwitch(platform, info, targetAccountNam
                 for (const name of fs.readdirSync(platDir)) {
                     if (name === targetAccountName) continue;
                     const slotDir = path.join(platDir, name);
-                    if (!fs.statSync(slotDir).isDirectory()) continue;
+                    try { if (!fs.statSync(slotDir).isDirectory()) continue; } catch (e) { continue; }
                     let slotId = null;
                     try {
                         slotId = JSON.parse(
@@ -425,7 +479,7 @@ async function resaveCurrentSessionBeforeSwitch(platform, info, targetAccountNam
                         ).value;
                     } catch (e) {}
                     if (!slotId) slotId = deriveEpicAccountIdFromBackup(slotDir);
-                    if (slotId && slotId.toLowerCase() === liveId.toLowerCase()) {
+                    if (slotId && String(slotId).toLowerCase() === String(liveId).toLowerCase()) {
                         currentName = name;
                         break;
                     }
@@ -614,21 +668,27 @@ ipcMain.handle('set-tray-lang', (event, lang) => {
 });
 
 // IPC handler to get Steam path from registry
+function resolveSteamInstall(candidate) {
+  if (!candidate) return null;
+  const cleaned = String(candidate).trim().replace(/[\\/]+$/, '');
+  if (cleaned && fs.existsSync(path.join(cleaned, 'steam.exe'))) return cleaned;
+  return null;
+}
+
 ipcMain.handle('get-steam-path', () => {
-  return new Promise((resolve, reject) => {
-    exec('reg query HKCU\\Software\\Valve\\Steam /v SteamPath', (error, stdout, stderr) => {
-      if (error) {
-        console.error('Error reading registry:', error);
-        return resolve(null);
+  return new Promise((resolve) => {
+    exec('reg query HKCU\\Software\\Valve\\Steam /v SteamPath', (error, stdout) => {
+      let found = null;
+      if (!error && stdout) {
+        const match = String(stdout).match(/REG_SZ\s+(.+)/);
+        if (match && match[1]) found = resolveSteamInstall(match[1]);
       }
-      
-      // Parse output: "    SteamPath    REG_SZ    c:/program files (x86)/steam"
-      const match = stdout.match(/REG_SZ\s+(.+)/);
-      if (match && match[1]) {
-        resolve(match[1].trim());
-      } else {
-        resolve(null);
+      if (!found) {
+        const pf86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+        const pf = process.env.ProgramFiles || 'C:\\Program Files';
+        found = resolveSteamInstall(path.join(pf86, 'Steam')) || resolveSteamInstall(path.join(pf, 'Steam'));
       }
+      resolve(found);
     });
   });
 });
@@ -700,7 +760,8 @@ async function killPlatformProcesses(platform) {
     const info = PLATFORM_INFO[platform];
     const list = (info && info.kill) ? info.kill : (info && info.process ? [info.process] : []);
     for (const proc of list) {
-        await new Promise(r => exec(`taskkill /F /IM ${proc} /T`, () => r()));
+        const image = String(proc).replace(/"/g, '');
+        await new Promise(r => exec(`taskkill /F /IM "${image}" /T`, () => r()));
     }
     const delay = (info && info.killDelayMs) ? info.killDelayMs : 1500;
     await new Promise(r => setTimeout(r, delay));
@@ -713,13 +774,21 @@ ipcMain.handle('save-platform-session', async (event, platform, accountName) => 
 
         await killPlatformProcesses(platform);
 
-        const targetDir = path.join(SESSIONS_DIR, platform, accountName);
-        if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+        const targetDir = sessionSlotDir(platform, accountName);
+        const createdDir = !fs.existsSync(targetDir);
+        if (createdDir) fs.mkdirSync(targetDir, { recursive: true });
 
         const savedCount = await saveSessionFromPlatform(info, targetDir, platform);
         if (savedCount === 0) {
+            if (createdDir) {
+                try { fs.rmSync(targetDir, { recursive: true, force: true }); } catch (e) {}
+            }
             throw new Error('Platform data not found. Open the launcher, log in, then save the session again.');
         }
+
+        const state = readPlatformActiveState();
+        state[platform] = accountName;
+        writePlatformActiveState(state);
 
         return { success: true, savedSlots: savedCount };
     } catch (e) {
@@ -729,10 +798,10 @@ ipcMain.handle('save-platform-session', async (event, platform, accountName) => 
 
 ipcMain.handle('switch-platform-session', async (event, platform, accountName) => {
     try {
+        const sourceDir = sessionSlotDir(platform, accountName);
         const info = PLATFORM_INFO[platform];
-        const sourceDir = path.join(SESSIONS_DIR, platform, accountName);
 
-        if (!info || !fs.existsSync(sourceDir)) throw new Error('Session not found.');
+        if (!fs.existsSync(sourceDir)) throw new Error('Session not found.');
 
         await killPlatformProcesses(platform);
 
@@ -746,7 +815,7 @@ ipcMain.handle('switch-platform-session', async (event, platform, accountName) =
             restored = await restoreSessionToPlatform(info, sourceDir, platform);
         }
         if (restored === 0) {
-            throw new Error('Session backup is empty or corrupted. Save the session again from Epic.');
+            throw new Error('Session backup is empty or corrupted. Save the session again.');
         }
 
         const state = readPlatformActiveState();
@@ -771,12 +840,102 @@ ipcMain.handle('launch-platform', (event, platform) => {
     return { success: false };
 });
 
+// Prepare any launcher for adding a NEW account without a server-side sign-out.
+// Signing out via the launcher's own UI can revoke the saved login token, which
+// invalidates existing backups. Instead we close the launcher, clear ONLY the
+// local session, and reopen it on the login screen — the account stays valid on
+// the launcher's servers, so its backup can still be restored with auto-login.
+async function epicPrepareNewAccount(info, platform) {
+    // Best-effort: preserve the currently signed-in account by re-saving its live
+    // session into the matching slot (identified reliably via live registry id).
+    let backedUp = null;
+    try {
+        const platDir = path.join(SESSIONS_DIR, platform);
+        const liveId = await readRegistryString(
+            EPIC_REGISTRY.hive, EPIC_REGISTRY.key, EPIC_REGISTRY.valueName
+        );
+        if (liveId && fs.existsSync(platDir)) {
+            for (const name of fs.readdirSync(platDir)) {
+                const slotDir = path.join(platDir, name);
+                try { if (!fs.statSync(slotDir).isDirectory()) continue; } catch (e) { continue; }
+                let slotId = null;
+                try {
+                    slotId = JSON.parse(
+                        fs.readFileSync(path.join(slotDir, 'registry', 'AccountId.json'), 'utf-8')
+                    ).value;
+                } catch (e) {}
+                if (!slotId) slotId = deriveEpicAccountIdFromBackup(slotDir);
+                if (slotId && String(slotId).toLowerCase() === String(liveId).toLowerCase()) {
+                    await saveSessionFromPlatform(info, slotDir, platform);
+                    backedUp = name;
+                    break;
+                }
+            }
+        }
+    } catch (e) {
+        console.error('[epic] pre-clear backup failed:', e.message);
+    }
+
+    // Clear ONLY the local session (no server-side sign-out) so Epic shows login
+    for (const ini of EPIC_GAME_USER_SETTINGS) {
+        try { await removePathSafe(ini); } catch (e) {}
+    }
+    try {
+        await execAsync(
+            `reg delete "${EPIC_REGISTRY.hive}\\${EPIC_REGISTRY.key}" /v "${EPIC_REGISTRY.valueName}" /f`
+        );
+    } catch (e) {}
+    await clearEpicWebCaches();
+    await clearEpicCaches();
+
+    return { success: true, backedUp };
+}
+
+ipcMain.handle('platform-prepare-new-account', async (event, platform) => {
+    try {
+        const info = PLATFORM_INFO[platform];
+        if (!info) throw new Error('Unknown platform.');
+
+        // Close the launcher so its session files aren't locked
+        await killPlatformProcesses(platform);
+
+        let result;
+        if (platform === 'epic' && info.useTcNoStyle) {
+            result = await epicPrepareNewAccount(info, platform);
+        } else {
+            // Generic launchers: the whole session-root folder(s) hold the login, so
+            // clearing them makes the launcher reopen on its login screen. There is no
+            // token-revocation concept here, so previously-saved backups stay valid.
+            // (The UI asks the user to save the current account first to keep it.)
+            let cleared = 0;
+            for (const root of getSessionRoots(info)) {
+                try {
+                    if (fs.existsSync(root.path)) { await removePathSafe(root.path); cleared++; }
+                } catch (e) {
+                    console.error(`[${platform}] clear failed ${root.slot}:`, e.message);
+                }
+            }
+            // No account is signed in locally now
+            const state = readPlatformActiveState();
+            if (state[platform]) { delete state[platform]; writePlatformActiveState(state); }
+            result = { success: true, cleared };
+        }
+
+        // Reopen the launcher → now on the login screen for the new account
+        launchPlatformAppMain(platform);
+        return result;
+    } catch (e) {
+        return { success: false, error: e.message };
+    }
+});
+
 ipcMain.handle('is-platform-running', async (event, platform) => {
     const info = PLATFORM_INFO[platform];
-    if (!info) return false;
+    if (!info || !info.process) return false;
+    const image = String(info.process).replace(/"/g, '');
     return new Promise((resolve) => {
-        exec(`tasklist /FI "IMAGENAME eq ${info.process}" /NH`, (err, stdout) => {
-            resolve(!err && stdout.toLowerCase().includes(info.process.toLowerCase()));
+        exec(`tasklist /FI "IMAGENAME eq ${image}" /NH`, (err, stdout) => {
+            resolve(!err && String(stdout || '').toLowerCase().includes(image.toLowerCase()));
         });
     });
 });
@@ -807,10 +966,23 @@ ipcMain.handle('get-platform-sessions', () => {
 
 ipcMain.handle('delete-platform-session', async (event, platform, accountName) => {
     try {
-        const sourceDir = path.join(SESSIONS_DIR, platform, accountName);
+        const sourceDir = sessionSlotDir(platform, accountName);
         if (fs.existsSync(sourceDir)) {
             fs.rmSync(sourceDir, { recursive: true, force: true });
         }
+        return { success: true };
+    } catch (e) {
+        return { success: false, error: e.message };
+    }
+});
+
+ipcMain.handle('rename-platform-session', async (event, platform, oldName, newName) => {
+    try {
+        const oldDir = sessionSlotDir(platform, oldName);
+        const newDir = sessionSlotDir(platform, newName);
+        if (path.resolve(oldDir) === path.resolve(newDir)) return { success: true };
+        if (fs.existsSync(newDir)) throw new Error('This name already exists.');
+        if (fs.existsSync(oldDir)) fs.renameSync(oldDir, newDir);
         return { success: true };
     } catch (e) {
         return { success: false, error: e.message };
@@ -822,10 +994,15 @@ let lastCpuInfo = os.cpus();
 
 function getCpuUsage() {
     const cpus = os.cpus();
+    if (!lastCpuInfo || lastCpuInfo.length !== cpus.length) {
+        lastCpuInfo = cpus;
+        return 0;
+    }
     let totalIdle = 0, totalTick = 0;
     for (let i = 0; i < cpus.length; i++) {
         const cpu = cpus[i];
         const lastCpu = lastCpuInfo[i];
+        if (!lastCpu) continue;
         const tickDiff = Object.values(cpu.times).reduce((a, b) => a + b, 0) -
                          Object.values(lastCpu.times).reduce((a, b) => a + b, 0);
         const idleDiff = cpu.times.idle - lastCpu.times.idle;
@@ -846,7 +1023,7 @@ ipcMain.handle('get-system-stats', async () => {
         cpu: {
             usage: getCpuUsage(),
             cores: os.cpus().length,
-            model: os.cpus()[0].model
+            model: (os.cpus()[0] && os.cpus()[0].model) || ''
         },
         ram: {
             total: totalMem,
@@ -866,8 +1043,9 @@ ipcMain.handle('get-gpu-stats', () => {
     return new Promise((resolve) => {
         // Try nvidia-smi first
         exec('nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits', (err, stdout) => {
-            if (!err && stdout.trim()) {
-                const parts = stdout.trim().split(',').map(s => s.trim());
+            if (!err && stdout && stdout.trim()) {
+                const line = stdout.trim().split(/\r?\n/)[0];
+                const parts = line.split(',').map(s => s.trim());
                 return resolve({
                     available: true,
                     name: parts[0],
@@ -880,7 +1058,7 @@ ipcMain.handle('get-gpu-stats', () => {
             }
             // Fallback: try Windows Performance Counter for GPU
             exec('powershell -Command "(Get-Counter \'\\GPU Engine(*engtype_3D)\\Utilization Percentage\' -ErrorAction SilentlyContinue).CounterSamples | Where-Object {$_.CookedValue -gt 0} | Measure-Object -Property CookedValue -Sum | Select-Object -ExpandProperty Sum"', (err2, stdout2) => {
-                const usage = parseFloat(stdout2);
+                const usage = parseFloat(stdout2 || '');
                 if (!isNaN(usage)) {
                     return resolve({ available: true, name: 'GPU', usage: Math.min(100, Math.round(usage)), type: 'generic' });
                 }
@@ -951,7 +1129,14 @@ function compareVersions(a, b) {
 }
 
 ipcMain.handle('open-external', (event, url) => {
-    shell.openExternal(url);
+    try {
+        const parsed = new URL(String(url || ''));
+        if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return { success: false };
+        shell.openExternal(parsed.href);
+        return { success: true };
+    } catch (e) {
+        return { success: false };
+    }
 });
 
 ipcMain.handle('app-version', () => app.getVersion());
@@ -979,9 +1164,11 @@ ipcMain.handle('import-backup', async () => {
 
 // ===== Process Monitor for Playtime Tracking =====
 ipcMain.handle('is-process-running', (event, processName) => {
+    const image = String(processName || '').replace(/"/g, '');
+    if (!image) return Promise.resolve(false);
     return new Promise((resolve) => {
-        exec(`tasklist /FI "IMAGENAME eq ${processName}" /NH`, (err, stdout) => {
-            resolve(!err && stdout.toLowerCase().includes(processName.toLowerCase()));
+        exec(`tasklist /FI "IMAGENAME eq ${image}" /NH`, (err, stdout) => {
+            resolve(!err && String(stdout || '').toLowerCase().includes(image.toLowerCase()));
         });
     });
 });
@@ -991,7 +1178,7 @@ ipcMain.handle('list-running-games', () => {
         // Get all processes and filter likely game executables
         exec('tasklist /FO CSV /NH', (err, stdout) => {
             if (err) return resolve([]);
-            const lines = stdout.split('\n').map(l => {
+            const lines = String(stdout || '').split('\n').map(l => {
                 const m = l.match(/^"([^"]+)"/);
                 return m ? m[1].toLowerCase() : null;
             }).filter(Boolean);
