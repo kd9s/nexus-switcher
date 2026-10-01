@@ -177,7 +177,7 @@ async function initDataStorage() {
     gameAccounts = await readEncryptedJson(gameAccountsFile, {});
     accountNotes = await readEncryptedJson(accountNotesFile, {});
     playtimeData = await readEncryptedJson(playtimeFile, {});
-    steamAccountsCatalog = await readEncryptedJson(steamCatalogFile, {});
+    steamAccountsCatalog = normalizeSteamUsers(await readEncryptedJson(steamCatalogFile, {}));
     platformAccountsCatalog = await readEncryptedJson(platformCatalogFile, {});
 }
 
@@ -296,8 +296,8 @@ function getCurrentSteamAccount() {
 function findAccountNameInUsers(users, accountName) {
     if (!accountName) return null;
     for (const steamId of Object.keys(users)) {
-        const name = users[steamId].AccountName;
-        if (name && name.toLowerCase() === accountName.toLowerCase()) return name;
+        const name = textValue(users[steamId] && users[steamId].AccountName);
+        if (name && name.toLowerCase() === textValue(accountName).toLowerCase()) return name;
     }
     return null;
 }
@@ -1197,14 +1197,26 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 // NOTE: Automatic polling removed by request. Use refreshAccountsBtn for manual refresh.
 
+function textValue(value) {
+    if (value === null || value === undefined) return '';
+    return String(value);
+}
+
 function normalizeSteamUsers(users) {
-    if (!users || typeof users !== 'object') return {};
+    if (!users || typeof users !== 'object' || Array.isArray(users)) return {};
     const result = {};
     for (const steamId of Object.keys(users)) {
         const u = users[steamId];
-        if (u && typeof u === 'object' && u.AccountName) {
-            result[steamId] = u;
-        }
+        if (!u || typeof u !== 'object') continue;
+        // vdf-parser turns numeric-looking names into numbers. Calling
+        // toLowerCase/localeCompare on those throws and blanks the account list.
+        const accountName = textValue(u.AccountName).trim();
+        if (!accountName) continue;
+        result[steamId] = {
+            ...u,
+            AccountName: accountName,
+            PersonaName: textValue(u.PersonaName).trim() || accountName
+        };
     }
     return result;
 }
@@ -1236,10 +1248,11 @@ function persistCatalogFromUsers(users) {
             changed = true;
         }
         const prev = JSON.stringify(steamAccountsCatalog[steamId]);
+        const accountName = textValue(u.AccountName).trim();
         steamAccountsCatalog[steamId] = {
             ...steamAccountsCatalog[steamId],
-            AccountName: u.AccountName,
-            PersonaName: u.PersonaName || steamAccountsCatalog[steamId].PersonaName || u.AccountName,
+            AccountName: accountName,
+            PersonaName: textValue(u.PersonaName).trim() || steamAccountsCatalog[steamId].PersonaName || accountName,
             MostRecent: u.MostRecent,
             RememberPassword: u.RememberPassword,
             AllowAutoLogin: u.AllowAutoLogin
@@ -1516,13 +1529,15 @@ async function renderAccountsGrid(users) {
     }
 
     const sortedIds = [...steamIds].sort((a, b) => {
-        const nameA = users[a].AccountName;
-        const nameB = users[b].AccountName;
+        const nameA = textValue(users[a] && users[a].AccountName);
+        const nameB = textValue(users[b] && users[b].AccountName);
         if (hasActiveSession) {
             if (nameA === session.accountName) return -1;
             if (nameB === session.accountName) return 1;
         }
-        return (users[a].PersonaName || nameA).localeCompare(users[b].PersonaName || nameB, currentLang);
+        const labelA = textValue((users[a] && users[a].PersonaName) || nameA);
+        const labelB = textValue((users[b] && users[b].PersonaName) || nameB);
+        return labelA.localeCompare(labelB, currentLang);
     });
 
     const otherCount = hasActiveSession
@@ -3264,7 +3279,7 @@ async function renderPlatformAccountsSections() {
                     if (a === activeAccount) return -1;
                     if (b === activeAccount) return 1;
                 }
-                return a.localeCompare(b, currentLang);
+                return textValue(a).localeCompare(textValue(b), currentLang);
             });
 
             if (labelEl) {
